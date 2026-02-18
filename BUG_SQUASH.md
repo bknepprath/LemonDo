@@ -153,10 +153,20 @@ No active bugs at this time.
 - **Root cause:** `QGraphicsDropShadowEffect` objects for completed stripes could become invalid after effect replacement, then later be reused, causing runtime crashes.
 - **Fix:** Hardened shadow-effect lifecycle with validity checks/recreation in `apply_theme`; separated focused-task shadow from completed-task shadow; reset focus flags/effects during animation interrupts.
 
+### BUG-015: Focus mode blur/effect regressions and delayed crash
+
+- **Severity:** critical
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`TaskStripe`, `enter_focus_mode`, `exit_focus_mode`)
+- **Root cause:** Focus mode repeatedly swapped graphics effects on task widgets and mixed with completion/un-completion transitions, causing stale/invalid effect state and intermittent crashes.
+- **Fix:** Reworked focus mode visuals to avoid blur/effect swapping on task stripes entirely. New mode uses pure-black global overlay + centered text label on focused task; non-focused tasks simply dim via paint overlay. Also separated long-press from click-to-edit flow to prevent accidental editor activation during focus entry.
+
 ---
 
 ## Stats
 
 | Total | Open | Resolved | Won't Fix |
 |-------|------|----------|-----------|
-| 14 | 0 | 14 | 0 |
+| 15 | 0 | 15 | 0 |

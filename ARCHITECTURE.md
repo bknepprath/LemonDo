@@ -56,9 +56,9 @@ Lemon Do/
 
 5. **Focus layer**
    - Long-press task interaction enters focus mode
-   - Applies blur/tint backdrop to non-focused UI
-   - Uses per-stripe dim overlays (instead of blur effects on stripes) for safer effect lifecycle
-   - Focused task renders a spinner indicator
+   - Applies full black backdrop overlay behind focused task
+   - Focused task switches to centered text label (read-only display)
+   - No cursor/editing in focus state
 
 ### Time Engine
 
@@ -141,8 +141,9 @@ Lemon Do/
 
 - Entry: 500ms long-press on an uncompleted task
 - Focused task animates to vertical center
-- Header/nav/add controls receive blur; non-focused stripes use local dim overlay
-- A tint overlay follows current background color
+- Global pure-black overlay darkens everything behind the focused task
+- Focused task displays centered text via internal label layer
+- Editor is hidden/read-only during focus mode to suppress cursor flashing
 - Exit: single click anywhere restores baseline UI state and layout
 
 ---
@@ -201,7 +202,6 @@ Lemon Do/
 - `stripe_wrapper` height must always cover both current and target positions during movement to avoid clipping.
 - Mask behavior differs by platform; code uses polygon mask fallback for compatibility.
 - `QGraphicsOpacityEffect` used during deletion can conflict with `QGraphicsDropShadowEffect` on the same widget; handled by using a separate effect instance.
-- Replacing task-level graphics effects can invalidate shadow effect objects; focus mode now avoids applying blur directly to task stripes.
 - Frequent iteration in animation logic means regressions can reappear unless run-time tested after each tweak.
 - Hibernate mode uses `screen.geometry()` for positioning; multi-monitor setups may need primary-screen detection.
 

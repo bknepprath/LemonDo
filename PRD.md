@@ -123,8 +123,9 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 
 - **Entry:** 500ms long-press on an uncompleted task.
 - **Behavior:** Selected task animates to vertical center.
-- **Backdrop effects:** Header/nav/add controls receive blur; non-focused tasks receive a dimmed overlay; global tint overlay follows current background color.
-- **Indicator:** Focused task renders a subtle spinning loading ring.
+- **Backdrop effects:** Everything behind the focused task is blacked out (pure black overlay).
+- **Text presentation:** Focused task text is centered both horizontally and vertically.
+- **Editing behavior:** No cursor and no inline editing while in focus mode.
 - **Exit:** Single click anywhere exits focus mode and restores normal layout.
 
 #### F-018: Nuke Reset
@@ -206,4 +207,4 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 | 2026-02-18 | AI | Replaced template with concrete PRD aligned to implemented behavior. |
 | 2026-02-18 | AI | Full rewrite: persistence, history nav, dual-zone layout, accordion, deletion, hibernate, Tab hotkey, top-layer fireworks. |
 | 2026-02-18 | AI | Added focus mode spec and updated hibernate geometry/hover animation behavior. |
-| 2026-02-18 | AI | Focus mode stability update: no stripe blur swapping, safer shadow lifecycle, crash hardening for complete/un-complete loops. |
+| 2026-02-18 | AI | Focus mode redesign: pure black backdrop, centered task text, no cursor/editing in focus state, long-press/click separation hardening. |
