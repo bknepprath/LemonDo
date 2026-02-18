@@ -54,6 +54,12 @@ Lemon Do/
    - Renders confetti particles above all stripe/button content
    - Clipped by pill path
 
+5. **Focus layer**
+   - Long-press task interaction enters focus mode
+   - Applies blur/tint backdrop to non-focused UI
+   - Uses per-stripe dim overlays (instead of blur effects on stripes) for safer effect lifecycle
+   - Focused task renders a spinner indicator
+
 ### Time Engine
 
 - Uses simulated app time: `datetime.now() + time_offset`
@@ -127,9 +133,17 @@ Lemon Do/
 
 ### Hibernate
 
-- Entry: shrink + fade to 30×80 pill at screen edge (280ms `OutCubic`)
+- Entry: shrink + fade to slim 38×30 pill at screen edge (280ms `OutCubic`)
 - Exit: pop back to saved geometry (240ms `OutBack`)
-- Hover: 5% scale-up + opacity bump (instant)
+- Hover: 5% scale-up + opacity bump (100ms animated)
+
+### Focus Mode
+
+- Entry: 500ms long-press on an uncompleted task
+- Focused task animates to vertical center
+- Header/nav/add controls receive blur; non-focused stripes use local dim overlay
+- A tint overlay follows current background color
+- Exit: single click anywhere restores baseline UI state and layout
 
 ---
 
@@ -149,6 +163,8 @@ Lemon Do/
 | `_animation_epoch` | `LemonDoWidget` | Counter to invalidate stale animation callbacks |
 | `_completion_in_progress` | `LemonDoWidget` | Guard to suppress relayout during completion |
 | `is_hibernated` | `LemonDoWidget` | Whether in hibernate state |
+| `_focus_mode_active` | `LemonDoWidget` | Whether focus mode is active |
+| `_focused_stripe` | `LemonDoWidget` | Task currently centered in focus mode |
 | `view_date` / `today_date` | `LemonDoWidget` | History navigation state |
 | `db` | `LemonDoWidget` | SQLite connection for task persistence |
 
@@ -185,6 +201,7 @@ Lemon Do/
 - `stripe_wrapper` height must always cover both current and target positions during movement to avoid clipping.
 - Mask behavior differs by platform; code uses polygon mask fallback for compatibility.
 - `QGraphicsOpacityEffect` used during deletion can conflict with `QGraphicsDropShadowEffect` on the same widget; handled by using a separate effect instance.
+- Replacing task-level graphics effects can invalidate shadow effect objects; focus mode now avoids applying blur directly to task stripes.
 - Frequent iteration in animation logic means regressions can reappear unless run-time tested after each tweak.
 - Hibernate mode uses `screen.geometry()` for positioning; multi-monitor setups may need primary-screen detection.
 

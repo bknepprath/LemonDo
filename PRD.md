@@ -64,6 +64,7 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 | F-018 | Nuke reset (N key) | P2 | Implemented |
 | F-019 | Confetti particle overlay (top-layer) | P1 | Implemented |
 | F-020 | Tab creates task when none exist or cursor at bottom | P1 | Implemented |
+| F-021 | Focus mode via long-press (task centering + backdrop effects) | P2 | Implemented |
 
 ### 3.2 Feature Details
 
@@ -114,9 +115,17 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 #### F-017: Hibernate Mode
 
 - **Entry:** Right-click context menu or 10-minute idle timer.
-- **Hibernated state:** Window shrinks to a 30×80px vertical pill, positioned 4% from right edge and 8% from bottom of screen, at 20% opacity.
-- **Hover:** 5% scale-up + slight opacity bump.
+- **Hibernated state:** Window shrinks to a slim 38×30px pill, positioned relative to screen edges, at 20% opacity.
+- **Hover:** 5% scale-up with a 100ms animation, then 100ms return on leave.
 - **Exit:** Left-click restores original geometry and full opacity with an `OutBack` pop animation.
+
+#### F-021: Focus Mode
+
+- **Entry:** 500ms long-press on an uncompleted task.
+- **Behavior:** Selected task animates to vertical center.
+- **Backdrop effects:** Header/nav/add controls receive blur; non-focused tasks receive a dimmed overlay; global tint overlay follows current background color.
+- **Indicator:** Focused task renders a subtle spinning loading ring.
+- **Exit:** Single click anywhere exits focus mode and restores normal layout.
 
 #### F-018: Nuke Reset
 
@@ -196,3 +205,5 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 | 2026-02-18 | AI | Initial PRD template created. |
 | 2026-02-18 | AI | Replaced template with concrete PRD aligned to implemented behavior. |
 | 2026-02-18 | AI | Full rewrite: persistence, history nav, dual-zone layout, accordion, deletion, hibernate, Tab hotkey, top-layer fireworks. |
+| 2026-02-18 | AI | Added focus mode spec and updated hibernate geometry/hover animation behavior. |
+| 2026-02-18 | AI | Focus mode stability update: no stripe blur swapping, safer shadow lifecycle, crash hardening for complete/un-complete loops. |

@@ -113,10 +113,50 @@ No active bugs at this time.
 - **Root cause:** Used `availableGeometry()` with fixed pixel offsets that didn't account for taskbar/scaling variations.
 - **Fix:** Changed to `screen.geometry()` with percentage-based margins (4% right, 8% bottom) and fixed pill size (30×80).
 
+### BUG-011: Long-press on task crashes app
+
+- **Severity:** critical
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`StripeTextEdit`, `TaskStripe`)
+- **Root cause:** Mouse button enum values were cast with `int(...)` in PyQt6 signal paths, which can raise type errors during press/release callbacks.
+- **Fix:** Changed `mouse_pressed`/`mouse_released` signals to emit enum objects directly and compared against `Qt.MouseButton.LeftButton` without integer casting.
+
+### BUG-012: Clicking completed items to un-complete crashes app
+
+- **Severity:** critical
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`StripeTextEdit`, `TaskStripe`, completed click flow)
+- **Root cause:** Same enum-casting crash path as BUG-011 was triggered when clicking completed-task editors during accordion/un-complete interaction.
+- **Fix:** Same signal/enum handling fix as BUG-011; un-complete click path now runs without type-casting exceptions.
+
+### BUG-013: Focus mode leaves completed list blurred after exit
+
+- **Severity:** high
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`enter_focus_mode`, `exit_focus_mode`, `TaskStripe.paintEvent`)
+- **Root cause:** Focus mode applied blur effects directly to task stripes, and effect restoration was fragile when task states changed mid-focus.
+- **Fix:** Reworked focus visuals so non-focused task stripes use local dim overlays (no blur effect swapping). Blur effects now apply only to header/nav/add controls and are cleanly restored on exit.
+
+### BUG-014: Crash after repeated complete/un-complete in focus-enabled build
+
+- **Severity:** critical
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`TaskStripe.apply_theme`, focus/graphics effects)
+- **Root cause:** `QGraphicsDropShadowEffect` objects for completed stripes could become invalid after effect replacement, then later be reused, causing runtime crashes.
+- **Fix:** Hardened shadow-effect lifecycle with validity checks/recreation in `apply_theme`; separated focused-task shadow from completed-task shadow; reset focus flags/effects during animation interrupts.
+
 ---
 
 ## Stats
 
 | Total | Open | Resolved | Won't Fix |
 |-------|------|----------|-----------|
-| 10 | 0 | 10 | 0 |
+| 14 | 0 | 14 | 0 |
