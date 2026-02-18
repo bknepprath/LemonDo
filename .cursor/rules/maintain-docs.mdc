@@ -1,0 +1,34 @@
+---
+description: Keep project documentation (PRD, Bug Squash, Architecture) up to date during every coding session.
+alwaysApply: true
+---
+
+# Documentation Maintenance
+
+Three markdown docs live at the project root. Keep them current as you work.
+
+## Files
+
+- `PRD.md` — Product requirements, features, milestones
+- `BUG_SQUASH.md` — Every bug found/fixed gets an entry
+- `ARCHITECTURE.md` — Directory map, key decisions, module summaries, conventions
+
+## When to Update
+
+| Trigger | Action |
+|---------|--------|
+| New feature started | Add feature row to PRD §3.1, update ARCHITECTURE module table |
+| Bug found | Add entry under "Active Bugs" in BUG_SQUASH |
+| Bug fixed | Move entry to "Resolved", update stats row |
+| New file/folder created | Update ARCHITECTURE directory tree |
+| Tech decision made | Add row to ARCHITECTURE "Key Decisions" |
+| Milestone reached | Update PRD §6 milestone status |
+| Stack chosen or changed | Update PRD §5 and ARCHITECTURE conventions |
+
+## Rules
+
+1. Update the `Last updated` date in each file you touch.
+2. Use the existing templates — don't restructure the docs.
+3. Increment BUG IDs sequentially (BUG-001, BUG-002, …).
+4. Feature IDs follow F-XXX format.
+5. Keep ARCHITECTURE directory tree accurate after any file/folder change.
