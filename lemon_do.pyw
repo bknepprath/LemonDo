@@ -15,6 +15,7 @@ from PyQt6.QtCore import (
     QSequentialAnimationGroup,
     Qt,
     QTimer,
+    QVariantAnimation,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -243,7 +244,7 @@ class TaskStripe(QWidget):
         else:
             text_color = get_contrast_color(self._base_color)
             stripe_bg = QColor(self._base_color)
-            if self._is_hovered:
+            if self._is_hovered and not self.editor.hasFocus():
                 stripe_bg = lerp_color(stripe_bg, QColor("#FFFFFF"), 0.12)
             frame_css = (
                 f"background-color: rgb({stripe_bg.red()}, {stripe_bg.green()}, {stripe_bg.blue()});"
@@ -346,9 +347,12 @@ class LemonDoWidget(QWidget):
         self.button_color = self.MORNING_BUTTON
         self.text_color = QColor("#111111")
         self.sleep_mode = False
+        self.pending_sleep_mode = False
         self.time_offset = timedelta(0)
         self.debug_visible = False
         self.title_font_family = title_font_family
+        self.current_segment: int | None = None
+        self.color_anim: QVariantAnimation | None = None
 
         self._drag_offset: QPoint | None = None
         self.particles: list[Particle] = []
@@ -366,9 +370,10 @@ class LemonDoWidget(QWidget):
         layout.setSpacing(0)
 
         header = QWidget(self)
+        header.setFixedHeight(122)
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(28, 36, 28, 16)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(28, 54, 28, 10)
+        header_layout.setSpacing(0)
         self.title = QLabel("Lemon Do")
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_font = QFont(self.title_font_family or self.font().family(), 30)
@@ -403,17 +408,20 @@ class LemonDoWidget(QWidget):
             self.buttons.append(btn)
 
         header_layout.addWidget(self.title)
-        header_layout.addWidget(self.sleep_label)
         layout.addWidget(header)
+        layout.addStretch(1)
+        layout.addWidget(self.sleep_label)
+        layout.addStretch(1)
 
-        stripe_wrapper = QWidget(self)
-        stripe_layout = QVBoxLayout(stripe_wrapper)
+        self.stripe_wrapper = QWidget(self)
+        stripe_layout = QVBoxLayout(self.stripe_wrapper)
         stripe_layout.setContentsMargins(0, 0, 0, 0)
-        stripe_layout.setSpacing(2)
+        stripe_layout.setSpacing(3)
         for btn in self.buttons:
             stripe_layout.addWidget(btn)
-        layout.addWidget(stripe_wrapper)
-        layout.addSpacing(58)
+        layout.addWidget(self.stripe_wrapper)
+        layout.addStretch(2)
+        layout.addSpacing(36)
 
     def _setup_timers(self) -> None:
         # Color scheduler: update every minute.
@@ -522,45 +530,110 @@ class LemonDoWidget(QWidget):
 
     def update_color_state(self) -> None:
         m = minute_of_day(self.get_app_time())
+        target_bg, target_button, target_sleep, target_text, segment = self._compute_target_state(m)
+        if self.current_segment is None:
+            self.current_segment = segment
+            self.sleep_mode = target_sleep
+            self.pending_sleep_mode = target_sleep
+            self.background_color = target_bg
+            self.button_color = target_button
+            self.text_color = target_text
+            self.apply_dynamic_styles()
+            self.update_debug_overlay()
+            self.update()
+            return
 
-        # Hard stop: 22:00 -> 04:00
-        if m >= 1320 or m < 240:
-            self.background_color = self.SLEEP_BG
-            self.button_color = self.EVENING_BUTTON
-            self.sleep_mode = True
-        else:
-            # Minute-accurate keyframes with explicit 16:00 dark-mode flip.
-            keyframes: list[tuple[int, QColor, QColor]] = [
-                (240, self.MORNING_BG, self.MORNING_BUTTON),     # 04:00
-                (959, self.AFTERNOON_BG, self.AFTERNOON_BUTTON), # 15:59
-                (960, self.FLIP_BG, self.FLIP_BUTTON),           # 16:00
-                (1319, self.EVENING_BG, self.EVENING_BUTTON),    # 21:59
-            ]
-            start_min, start_bg, start_button = keyframes[0]
-            end_min, end_bg, end_button = keyframes[-1]
-            for idx in range(len(keyframes) - 1):
-                a_min, a_bg, a_button = keyframes[idx]
-                b_min, b_bg, b_button = keyframes[idx + 1]
-                if a_min <= m <= b_min:
-                    start_min, start_bg, start_button = a_min, a_bg, a_button
-                    end_min, end_bg, end_button = b_min, b_bg, b_button
-                    break
-            span = max(1, end_min - start_min)
-            t = (m - start_min) / span
-            self.background_color = lerp_color(start_bg, end_bg, t)
-            self.button_color = lerp_color(start_button, end_button, t)
-            self.sleep_mode = False
+        if segment != self.current_segment:
+            self._animate_color_transition(target_bg, target_button, target_text, target_sleep, segment)
+            return
 
-        if self.sleep_mode:
-            self.text_color = QColor("#FFFFFF")
-        else:
-            self.text_color = get_contrast_color(self.background_color)
-
+        self.sleep_mode = target_sleep
+        self.pending_sleep_mode = target_sleep
+        self.background_color = target_bg
+        self.button_color = target_button
+        self.text_color = target_text
         self.apply_dynamic_styles()
         self.update_debug_overlay()
         self.update()
 
-    def apply_dynamic_styles(self) -> None:
+    def _compute_target_state(self, minute: int) -> tuple[QColor, QColor, bool, QColor, int]:
+        if minute >= 1320 or minute < 240:
+            bg = QColor(self.SLEEP_BG)
+            button = QColor(self.EVENING_BUTTON)
+            text = QColor("#FFFFFF")
+            return bg, button, True, text, 0
+
+        keyframes: list[tuple[int, QColor, QColor]] = [
+            (240, self.MORNING_BG, self.MORNING_BUTTON),     # 04:00
+            (959, self.AFTERNOON_BG, self.AFTERNOON_BUTTON), # 15:59
+            (960, self.FLIP_BG, self.FLIP_BUTTON),           # 16:00
+            (1319, self.EVENING_BG, self.EVENING_BUTTON),    # 21:59
+        ]
+        start_min, start_bg, start_button = keyframes[0]
+        end_min, end_bg, end_button = keyframes[-1]
+        for idx in range(len(keyframes) - 1):
+            a_min, a_bg, a_button = keyframes[idx]
+            b_min, b_bg, b_button = keyframes[idx + 1]
+            if a_min <= minute <= b_min:
+                start_min, start_bg, start_button = a_min, a_bg, a_button
+                end_min, end_bg, end_button = b_min, b_bg, b_button
+                break
+        span = max(1, end_min - start_min)
+        t = (minute - start_min) / span
+        bg = lerp_color(start_bg, end_bg, t)
+        button = lerp_color(start_button, end_button, t)
+        text = get_contrast_color(bg)
+        segment = 1 if minute < 960 else 2
+        return bg, button, False, text, segment
+
+    def _animate_color_transition(
+        self,
+        target_bg: QColor,
+        target_button: QColor,
+        target_text: QColor,
+        target_sleep: bool,
+        target_segment: int,
+    ) -> None:
+        if self.color_anim is not None and self.color_anim.state() == QAbstractAnimation.State.Running:
+            self.color_anim.stop()
+
+        from_bg = QColor(self.background_color)
+        from_button = QColor(self.button_color)
+        from_text = QColor(self.text_color)
+        self.pending_sleep_mode = target_sleep
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(1000)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        def on_value_changed(value) -> None:
+            t = float(value)
+            self.background_color = lerp_color(from_bg, target_bg, t)
+            self.button_color = lerp_color(from_button, target_button, t)
+            self.text_color = lerp_color(from_text, target_text, t)
+            self.apply_dynamic_styles(in_transition=True)
+            self.update_debug_overlay()
+            self.update()
+
+        def on_finished() -> None:
+            self.current_segment = target_segment
+            self.sleep_mode = target_sleep
+            self.pending_sleep_mode = target_sleep
+            self.background_color = QColor(target_bg)
+            self.button_color = QColor(target_button)
+            self.text_color = QColor(target_text)
+            self.apply_dynamic_styles(in_transition=False)
+            self.update_debug_overlay()
+            self.update()
+
+        anim.valueChanged.connect(on_value_changed)
+        anim.finished.connect(on_finished)
+        self.color_anim = anim
+        anim.start()
+
+    def apply_dynamic_styles(self, in_transition: bool = False) -> None:
         self.title.setStyleSheet(
             f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
@@ -568,15 +641,19 @@ class LemonDoWidget(QWidget):
             f"font-size: 20px; font-weight: 600; color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
 
-        if self.sleep_mode:
-            for btn in self.buttons:
-                btn.hide()
+        if in_transition:
+            # Keep lockout label hidden during fades; show only in settled sleep mode.
+            self.stripe_wrapper.show()
+            self.sleep_label.hide()
+        elif self.sleep_mode:
+            self.stripe_wrapper.hide()
             self.sleep_label.show()
         else:
-            for btn in self.buttons:
-                btn.show()
-                btn.apply_theme(self.button_color)
+            self.stripe_wrapper.show()
             self.sleep_label.hide()
+
+        for btn in self.buttons:
+            btn.apply_theme(self.button_color)
 
     def spawn_confetti(self, global_pos: QPoint) -> None:
         if self.sleep_mode:
