@@ -1,8 +1,9 @@
 import math
 import random
+import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -35,6 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -75,6 +77,29 @@ class Particle:
     radius: float
     life: float
     fade_speed: float
+
+
+class ParticleOverlay(QWidget):
+    def __init__(self, owner: "LemonDoWidget") -> None:
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event) -> None:
+        if not self.owner.particles:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not self.owner.pill_path.isEmpty():
+            painter.setClipPath(self.owner.pill_path)
+        for p in self.owner.particles:
+            alpha = int(max(0, min(255, p.life * 255)))
+            c = QColor(p.color)
+            c.setAlpha(alpha)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(c)
+            painter.drawEllipse(p.pos, p.radius, p.radius)
 
 
 class StripeTextEdit(QTextEdit):
@@ -119,6 +144,8 @@ class TaskStripe(QWidget):
     height_changed = pyqtSignal()
     state_changed = pyqtSignal()
     focus_move_requested = pyqtSignal(object, int)
+    completed_clicked = pyqtSignal(object)
+    delete_requested = pyqtSignal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -135,6 +162,10 @@ class TaskStripe(QWidget):
         self._base_color = QColor("#1A237E")
         self._placeholder_color = QColor(255, 255, 255, 150)
         self._is_hovered = False
+        self._shadow_effect: QGraphicsDropShadowEffect | None = None
+        self._opacity_effect: QGraphicsOpacityEffect | None = None
+        self.is_deleting = False
+        self.deletion_progress = 0.0
 
         self.editor = StripeTextEdit(self)
         self.editor.setReadOnly(False)
@@ -150,11 +181,18 @@ class TaskStripe(QWidget):
         self.check_button.setVisible(False)
         self.check_button.clicked.connect(self._on_check_clicked)
 
+        self.trash_button = QPushButton("✕", self)
+        self.trash_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.trash_button.setFixedSize(28, 28)
+        self.trash_button.setVisible(False)
+        self.trash_button.clicked.connect(self._on_delete_clicked)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         layout.addWidget(self.editor)
         layout.addWidget(self.check_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.trash_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self.apply_theme(self._base_color)
         self._sync_state_with_text()
@@ -173,16 +211,23 @@ class TaskStripe(QWidget):
 
     def _on_click_inside(self) -> None:
         if self.state == self.COMPLETED:
+            self.completed_clicked.emit(self)
             return
         self._begin_inline_edit()
 
     def _on_double_click_inside(self) -> None:
         if self.state == self.COMPLETED:
+            self.completed_clicked.emit(self)
             return
         self._begin_inline_edit()
 
     def _on_check_clicked(self) -> None:
         self.set_completed()
+
+    def _on_delete_clicked(self) -> None:
+        if self.is_deleting:
+            return
+        self.delete_requested.emit(self)
 
     def _begin_inline_edit(self) -> None:
         if self.state == self.COMPLETED:
@@ -238,6 +283,18 @@ class TaskStripe(QWidget):
         self.completed.emit(global_center)
         self.state_changed.emit()
 
+    def reopen_from_completed(self) -> None:
+        if self.state != self.COMPLETED:
+            return
+        self.state = self.ACTIVE
+        self.completion_rank = None
+        self.completion_fade = 0.0
+        self.editor.setReadOnly(False)
+        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.apply_theme(self._base_color)
+        self._update_check_visibility()
+        self.state_changed.emit()
+
     def reset_slot(self) -> None:
         self.state = self.EMPTY
         self.completion_fade = 1.0
@@ -251,6 +308,24 @@ class TaskStripe(QWidget):
         self._adjust_height_to_content()
         self.state_changed.emit()
 
+    def load_state(self, text: str, status: str, completion_rank: int | None = None) -> None:
+        self.editor.blockSignals(True)
+        self.editor.setPlainText(text or "")
+        self.editor.blockSignals(False)
+        self.task_text = (text or "").strip()
+        if status == self.COMPLETED and self.task_text:
+            self.state = self.COMPLETED
+            self.completion_rank = completion_rank
+            self.completion_fade = 1.0
+            self.editor.setReadOnly(True)
+        else:
+            self.state = self.ACTIVE if self.task_text else self.EMPTY
+            self.completion_rank = None
+            self.completion_fade = 0.0
+            self.editor.setReadOnly(False)
+        self._update_check_visibility()
+        self._adjust_height_to_content()
+
     def enterEvent(self, event) -> None:
         self._is_hovered = True
         self._update_check_visibility()
@@ -262,20 +337,70 @@ class TaskStripe(QWidget):
         super().leaveEvent(event)
 
     def _update_check_visibility(self) -> None:
-        show = self._is_hovered and self.state == self.ACTIVE and self.state != self.COMPLETED
-        self.check_button.setVisible(show)
+        if self.is_deleting:
+            self.check_button.setVisible(False)
+            self.trash_button.setVisible(False)
+            return
+        show_check = self._is_hovered and self.state == self.ACTIVE
+        show_delete = self._is_hovered
+        self.check_button.setVisible(show_check)
+        self.trash_button.setVisible(show_delete)
+
+    def begin_delete_visual(self) -> None:
+        self.is_deleting = True
+        self.editor.setReadOnly(True)
+        self.editor.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self._update_check_visibility()
+        if self._opacity_effect is None:
+            self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
+
+    def set_delete_progress(self, progress: float) -> None:
+        self.deletion_progress = max(0.0, min(1.0, progress))
+        self.apply_theme(self._base_color)
+
+    def set_delete_opacity(self, opacity: float) -> None:
+        if self._opacity_effect is None:
+            self._opacity_effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._opacity_effect)
+        self._opacity_effect.setOpacity(max(0.0, min(1.0, opacity)))
+
+    def clear_delete_visual(self) -> None:
+        self.is_deleting = False
+        self.deletion_progress = 0.0
+        self.setGraphicsEffect(None)
+        self._update_check_visibility()
 
     def apply_theme(self, base_color: QColor) -> None:
         self._base_color = QColor(base_color)
+        if self.is_deleting:
+            deep_red = QColor("#6B1111")
+            mixed = lerp_color(QColor(self._base_color), deep_red, self.deletion_progress)
+            frame_css = (
+                f"background-color: rgb({mixed.red()}, {mixed.green()}, {mixed.blue()});"
+                "border-radius: 0px; border: 1px solid rgba(255, 120, 120, 70);"
+            )
+            text_color = QColor("#F7E9E9")
+            self.setStyleSheet(frame_css)
+            self.editor.setStyleSheet(
+                "QTextEdit {"
+                "background: transparent;"
+                "border: none;"
+                f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()});"
+                f"selection-background-color: rgba({text_color.red()}, {text_color.green()}, {text_color.blue()}, 58);"
+                "font-size: 18px;"
+                "font-weight: 600;"
+                "}"
+            )
+            return
         if self.state == self.COMPLETED:
             p = max(0.0, min(1.0, self.completion_fade))
-            base_bg = QColor(self._base_color)
-            completed_bg = QColor(55, 55, 55)
-            mixed = lerp_color(base_bg, completed_bg, p)
-            text_color = lerp_color(get_contrast_color(base_bg), QColor("#B0B0B0"), p)
-            alpha = int(210 - (45 * p))
+            completed_bg = QColor("#565656")
+            mixed = lerp_color(QColor(self._base_color), completed_bg, p)
+            text_color = QColor("#E8E8E8")
             frame_css = (
-                f"background-color: rgba({mixed.red()}, {mixed.green()}, {mixed.blue()}, {alpha});"
+                f"background-color: rgb({mixed.red()}, {mixed.green()}, {mixed.blue()});"
                 "border-radius: 0px; border: 1px solid rgba(220, 220, 220, 28);"
             )
             font = QFont(self.editor.font())
@@ -284,6 +409,12 @@ class TaskStripe(QWidget):
             self.editor.setFont(font)
             self.editor.setCursor(Qt.CursorShape.ForbiddenCursor)
             self._placeholder_color = QColor(210, 210, 210, 90)
+            if self._shadow_effect is None:
+                self._shadow_effect = QGraphicsDropShadowEffect(self)
+            self._shadow_effect.setOffset(0, 2)
+            self._shadow_effect.setBlurRadius(9)
+            self._shadow_effect.setColor(QColor(0, 0, 0, 90))
+            self.setGraphicsEffect(self._shadow_effect)
         else:
             text_color = get_contrast_color(self._base_color)
             stripe_bg = QColor(self._base_color)
@@ -300,6 +431,7 @@ class TaskStripe(QWidget):
             self.editor.setFont(font)
             self.editor.setCursor(Qt.CursorShape.IBeamCursor)
             self._placeholder_color = QColor(text_color.red(), text_color.green(), text_color.blue(), 140)
+            self.setGraphicsEffect(None)
 
         self.setStyleSheet(frame_css)
         ph = self._placeholder_color
@@ -316,6 +448,20 @@ class TaskStripe(QWidget):
             "}"
             "QPushButton:hover {"
             "background-color: rgba(255, 255, 255, 55);"
+            "}"
+        )
+        self.trash_button.setStyleSheet(
+            "QPushButton {"
+            "background-color: rgba(0, 0, 0, 28);"
+            f"color: rgb({check_text.red()}, {check_text.green()}, {check_text.blue()});"
+            "border: 1px solid rgba(255, 255, 255, 40);"
+            "border-radius: 14px;"
+            "font-size: 14px;"
+            "font-weight: 700;"
+            "padding: 0px;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: rgba(255, 88, 88, 118);"
             "}"
         )
         self.editor.setStyleSheet(
@@ -375,6 +521,12 @@ class LemonDoWidget(QWidget):
 
     def __init__(self, title_font_family: str | None = None) -> None:
         super().__init__()
+        self.data_path = Path(__file__).resolve().parent / "lemon_do_history.db"
+        self.db = sqlite3.connect(self.data_path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
+        self._ensure_schema()
+
         self.setWindowTitle("Lemon Do")
         self.setMinimumSize(300, 820)
         self.resize(330, 820)
@@ -405,7 +557,19 @@ class LemonDoWidget(QWidget):
         self._stack_animations: list[QAbstractAnimation] = []
         self._completion_sequence_group: QSequentialAnimationGroup | None = None
         self._window_resize_anim: QPropertyAnimation | None = None
+        self._running_animations: list[QAbstractAnimation] = []
+        self._animation_targets: dict[QWidget, QRect] = {}
+        self._last_layout_targets: dict[TaskStripe, QRect] = {}
+        self._last_add_target: QRect | None = None
+        self._loading_state = False
+        self._accordion_open = False
+        self._suppress_state_signal = False
+        self.nav_controls_visible = False
+        self.zone_separation = 26
+        self._animation_epoch = 0
         self.pill_path = QPainterPath()
+        self.today_date = self.get_app_time().date()
+        self.view_date = self.today_date
 
         self._drag_offset: QPoint | None = None
         self.particles: list[Particle] = []
@@ -416,6 +580,7 @@ class LemonDoWidget(QWidget):
         self._position_debug_overlay()
         self._setup_shortcuts()
         self._setup_timers()
+        self._load_day(self.view_date)
         self.update_color_state()
 
     def _build_ui(self) -> None:
@@ -434,6 +599,24 @@ class LemonDoWidget(QWidget):
         self.title.setFont(title_font)
         self.title.setStyleSheet("color: rgb(20, 20, 20);")
         self.title.raise_()
+
+        self.back_button = QPushButton("◀", self)
+        self.back_button.setFixedSize(28, 28)
+        self.back_button.clicked.connect(lambda _checked=False: self.navigate_days(-1))
+        self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_button.raise_()
+
+        self.forward_button = QPushButton("▶", self)
+        self.forward_button.setFixedSize(28, 28)
+        self.forward_button.clicked.connect(lambda _checked=False: self.navigate_days(1))
+        self.forward_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forward_button.raise_()
+
+        self.day_label = QLabel(self)
+        self.day_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.day_label.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 0.6px;")
+        self.day_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.day_label.raise_()
 
         self.debug_label = QLabel(self)
         self.debug_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -477,9 +660,11 @@ class LemonDoWidget(QWidget):
         layout.addStretch(2)
         layout.addSpacing(36)
 
-        for _ in range(3):
-            self.add_task_stripe(animate=False)
-        self.relayout_stripes(animated=False)
+        self.particle_overlay = ParticleOverlay(self)
+        self.particle_overlay.setGeometry(self.rect())
+        self.particle_overlay.raise_()
+
+        self._update_nav_buttons()
 
     def _setup_timers(self) -> None:
         # Color scheduler: update every minute.
@@ -497,6 +682,250 @@ class LemonDoWidget(QWidget):
         self.toggle_add_shortcut = QShortcut(QKeySequence("A"), self)
         self.toggle_add_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.toggle_add_shortcut.activated.connect(self.toggle_add_button_visibility)
+        self.toggle_history_shortcut = QShortcut(QKeySequence("P"), self)
+        self.toggle_history_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.toggle_history_shortcut.activated.connect(self.toggle_history_controls)
+        self.nuke_shortcut = QShortcut(QKeySequence("N"), self)
+        self.nuke_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.nuke_shortcut.activated.connect(self.nuke_all_task_data)
+
+    def toggle_history_controls(self) -> None:
+        self.nav_controls_visible = not self.nav_controls_visible
+        self._position_title()
+        self._update_nav_buttons()
+
+    def closeEvent(self, event) -> None:
+        self._save_current_day()
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _ensure_schema(self) -> None:
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                day TEXT NOT NULL,
+                task_id INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'EMPTY')),
+                text TEXT NOT NULL DEFAULT '',
+                completion_rank INTEGER,
+                PRIMARY KEY (day, task_id)
+            )
+            """
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_day_status ON tasks(day, status)")
+        self.db.commit()
+
+    def _collect_day_rows(self) -> list[tuple[int, str, str, int | None]]:
+        rows: list[tuple[int, str, str, int | None]] = []
+        for idx, stripe in enumerate(self.buttons):
+            if stripe.is_deleting:
+                continue
+            text = stripe.editor.toPlainText()
+            rows.append((idx, stripe.state, text, stripe.completion_rank))
+        return rows
+
+    def _save_current_day(self) -> None:
+        if not hasattr(self, "buttons"):
+            return
+        day_key = self.view_date.isoformat()
+        rows = self._collect_day_rows()
+        with self.db:
+            self.db.execute("DELETE FROM tasks WHERE day = ?", (day_key,))
+            for task_id, status, text, completion_rank in rows:
+                self.db.execute(
+                    """
+                    INSERT INTO tasks(day, task_id, status, text, completion_rank)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (day_key, task_id, status, text, completion_rank),
+                )
+
+    def _fetch_day_rows(self, day_value: date) -> list[tuple[int, str, str, int | None]]:
+        day_key = day_value.isoformat()
+        cur = self.db.execute(
+            """
+            SELECT task_id, status, text, completion_rank
+            FROM tasks
+            WHERE day = ?
+            ORDER BY task_id ASC
+            """,
+            (day_key,),
+        )
+        return [(int(a), str(b), str(c), int(d) if d is not None else None) for a, b, c, d in cur.fetchall()]
+
+    def _clear_all_stripes(self) -> None:
+        for stripe in self.buttons:
+            stripe.setParent(None)
+            stripe.deleteLater()
+        self.buttons.clear()
+
+    def _load_day(self, day_value: date) -> None:
+        self._interrupt_and_snap_animations()
+        rows = self._fetch_day_rows(day_value)
+        self._loading_state = True
+        self._clear_all_stripes()
+        if rows:
+            for _task_id, status, text, completion_rank in rows:
+                stripe = self._create_task_stripe()
+                stripe.load_state(text, status, completion_rank)
+                stripe.apply_theme(self.button_color)
+        else:
+            for _ in range(3):
+                stripe = self._create_task_stripe()
+                stripe.load_state("", TaskStripe.EMPTY, None)
+                stripe.apply_theme(self.button_color)
+        self._accordion_open = False
+        self._completed_counter = max(
+            [b.completion_rank for b in self.buttons if b.completion_rank is not None] + [0]
+        ) + 1
+        self.view_date = day_value
+        self._loading_state = False
+        self.relayout_stripes(animated=False)
+        self._resize_window_to_fit(animated=False)
+        self._update_nav_buttons()
+
+    def _check_for_new_day(self) -> None:
+        now_day = self.get_app_time().date()
+        if now_day == self.today_date:
+            return
+        old_today = self.today_date
+        if self.view_date == old_today:
+            self._save_current_day()
+        self.today_date = now_day
+        self.db.execute("DELETE FROM tasks WHERE day = ?", (now_day.isoformat(),))
+        self.db.commit()
+        if self.view_date == old_today:
+            self._load_day(now_day)
+        self._update_nav_buttons()
+
+    def _navigation_today(self) -> date:
+        # Navigation should be anchored to real calendar day, not debug time offset.
+        return date.today()
+
+    def navigate_days(self, delta: int) -> None:
+        target = self.view_date + timedelta(days=delta)
+        nav_today = self._navigation_today()
+        if target > nav_today:
+            target = nav_today
+        if target == self.view_date:
+            return
+        self._interrupt_and_snap_animations()
+        self._save_current_day()
+        self._load_day(target)
+
+    def _update_nav_buttons(self) -> None:
+        if not hasattr(self, "back_button"):
+            return
+        nav_today = self._navigation_today()
+        self.back_button.setEnabled(True)
+        self.forward_button.setEnabled(self.view_date < nav_today)
+        self.back_button.setVisible(self.nav_controls_visible)
+        self.forward_button.setVisible(self.nav_controls_visible)
+        show_today_label = self.nav_controls_visible and self.view_date < nav_today
+        self.day_label.setVisible(show_today_label)
+        self.day_label.setText(self.view_date.strftime("%b %d"))
+
+    def _register_animation(self, animation: QAbstractAnimation, target_widget: QWidget | None = None, end_rect: QRect | None = None) -> None:
+        self._running_animations.append(animation)
+        if target_widget is not None and end_rect is not None:
+            self._animation_targets[target_widget] = QRect(end_rect)
+        animation.finished.connect(lambda: self._remove_animation(animation))
+
+    def _remove_animation(self, animation: QAbstractAnimation) -> None:
+        if animation in self._running_animations:
+            self._running_animations.remove(animation)
+
+    def _compute_animation_bounds(self, targets: dict[TaskStripe, QRect], add_target: QRect | None, base_height: int) -> int:
+        current_bottom = 0
+        for stripe in self.buttons:
+            try:
+                if stripe.is_deleting:
+                    continue
+                rect = stripe.geometry()
+                current_bottom = max(current_bottom, rect.y() + rect.height())
+            except RuntimeError:
+                continue
+        target_bottom = 0
+        for rect in targets.values():
+            target_bottom = max(target_bottom, rect.y() + rect.height())
+        add_bottom = 0
+        try:
+            if self.add_task_button.isVisible():
+                add_bottom = max(add_bottom, self.add_task_button.geometry().y() + self.add_task_button.height())
+        except RuntimeError:
+            pass
+        if add_target is not None:
+            add_bottom = max(add_bottom, add_target.y() + add_target.height())
+        return max(base_height, current_bottom + 8, target_bottom + 8, add_bottom + 8)
+
+    def _interrupt_and_snap_animations(self) -> None:
+        has_running = False
+        if self.color_anim is not None and self.color_anim.state() == QAbstractAnimation.State.Running:
+            has_running = True
+        if self._window_resize_anim and self._window_resize_anim.state() == QAbstractAnimation.State.Running:
+            has_running = True
+        if self._completion_sequence_group and self._completion_sequence_group.state() == QAbstractAnimation.State.Running:
+            has_running = True
+        for anim in list(self._running_animations):
+            if anim.state() == QAbstractAnimation.State.Running:
+                has_running = True
+                break
+        if not has_running:
+            if hasattr(self, "add_task_button"):
+                self.add_task_button.setEnabled(True)
+            return
+
+        self._animation_epoch += 1
+        if self.color_anim is not None and self.color_anim.state() == QAbstractAnimation.State.Running:
+            self.color_anim.stop()
+        if self._window_resize_anim and self._window_resize_anim.state() == QAbstractAnimation.State.Running:
+            self._window_resize_anim.stop()
+        if self._completion_sequence_group and self._completion_sequence_group.state() == QAbstractAnimation.State.Running:
+            self._completion_sequence_group.stop()
+        for anim in list(self._running_animations):
+            try:
+                anim.stop()
+            except Exception:
+                pass
+        for widget, rect in list(self._animation_targets.items()):
+            try:
+                if widget is not None and widget.parent() is not None:
+                    widget.setGeometry(rect)
+            except RuntimeError:
+                continue
+        if self._last_layout_targets:
+            for stripe, target in self._last_layout_targets.items():
+                try:
+                    if stripe.parent() is not None:
+                        stripe.setGeometry(target)
+                except RuntimeError:
+                    continue
+        if self._last_add_target is not None:
+            try:
+                if self.add_task_button.parent() is not None:
+                    self.add_task_button.setGeometry(self._last_add_target)
+                    self.add_task_button.raise_()
+            except RuntimeError:
+                pass
+        for stripe in self.buttons:
+            try:
+                if stripe.is_deleting:
+                    stripe.clear_delete_visual()
+                    stripe.apply_theme(self.button_color)
+                if stripe.state == TaskStripe.COMPLETED:
+                    stripe.completion_fade = 1.0
+                    stripe.apply_theme(self.button_color)
+            except RuntimeError:
+                continue
+        self._running_animations.clear()
+        self._animation_targets.clear()
+        if hasattr(self, "add_task_button"):
+            self.add_task_button.setEnabled(True)
+        self.main_layout.setEnabled(True)
+        self.main_layout.activate()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -512,6 +941,9 @@ class LemonDoWidget(QWidget):
         self._position_title()
         self.relayout_stripes(animated=False)
         self._position_debug_overlay()
+        if hasattr(self, "particle_overlay"):
+            self.particle_overlay.setGeometry(self.rect())
+            self.particle_overlay.raise_()
 
     def _position_title(self) -> None:
         title_w = max(120, self.width() - 56)
@@ -519,6 +951,13 @@ class LemonDoWidget(QWidget):
         x = int((self.width() - title_w) / 2)
         self.title.setGeometry(x, 50, title_w, title_h)
         self.title.raise_()
+        nav_y = self.title.y() + self.title.height() + 8
+        self.back_button.setGeometry(34, nav_y, 28, 28)
+        self.forward_button.setGeometry(self.width() - 62, nav_y, 28, 28)
+        self.day_label.setGeometry(int((self.width() - 100) / 2), nav_y + 4, 100, 18)
+        self.back_button.raise_()
+        self.forward_button.raise_()
+        self.day_label.raise_()
 
     def _position_debug_overlay(self) -> None:
         overlay_w = 160
@@ -528,38 +967,144 @@ class LemonDoWidget(QWidget):
         self.debug_label.setGeometry(x, y, overlay_w, overlay_h)
 
     def on_stripe_height_changed(self) -> None:
-        self.relayout_stripes(animated=False)
-        self._resize_window_to_fit(animated=False)
+        self.recenter_ui(animated=False)
         self._position_debug_overlay()
 
     def add_task_stripe(self, animate: bool = True) -> None:
+        stripe = self._create_task_stripe()
+        if animate:
+            self._animate_add_task_sequence(stripe)
+        else:
+            self.recenter_ui(animated=False)
+
+    def _create_task_stripe(self) -> TaskStripe:
         stripe = TaskStripe(self.stripe_wrapper)
         stripe.completed.connect(self.spawn_confetti)
         stripe.height_changed.connect(self.on_stripe_height_changed)
         stripe.state_changed.connect(self.on_stripe_state_changed)
         stripe.focus_move_requested.connect(self.on_focus_move_requested)
+        stripe.completed_clicked.connect(self.on_completed_clicked)
+        stripe.delete_requested.connect(self.on_delete_requested)
         stripe.apply_theme(self.button_color)
         stripe.show()
         self.buttons.append(stripe)
-        if animate:
-            self._animate_add_task_sequence(stripe)
-        else:
-            self.relayout_stripes(animated=False)
-            self._resize_window_to_fit(animated=False)
+        return stripe
 
     def on_focus_move_requested(self, from_stripe: TaskStripe, direction: int) -> None:
         candidates = [b for b in self.buttons if b.state != TaskStripe.COMPLETED]
         if not candidates:
+            if direction >= 0:
+                self.add_task_stripe(animate=True)
+                if self.buttons:
+                    newest = self.buttons[-1]
+                    QTimer.singleShot(520, newest.focus_for_input)
             return
         if from_stripe not in candidates:
             target = candidates[0]
             target.focus_for_input()
             return
         idx = candidates.index(from_stripe)
-        next_idx = (idx + (1 if direction >= 0 else -1)) % len(candidates)
-        candidates[next_idx].focus_for_input()
+        if direction >= 0:
+            if idx == len(candidates) - 1:
+                self.add_task_stripe(animate=True)
+                if self.buttons:
+                    newest = self.buttons[-1]
+                    QTimer.singleShot(520, newest.focus_for_input)
+                return
+            below = candidates[idx + 1] if idx + 1 < len(candidates) else None
+            if below is not None and below.state == TaskStripe.EMPTY:
+                below.focus_for_input()
+                return
+            # Tab shortcut: no empty stripe below -> create one with slide-in.
+            self.add_task_stripe(animate=True)
+            if self.buttons:
+                newest = self.buttons[-1]
+                QTimer.singleShot(520, newest.focus_for_input)
+            return
+        prev_idx = (idx - 1) % len(candidates)
+        candidates[prev_idx].focus_for_input()
+
+    def on_completed_clicked(self, stripe: TaskStripe) -> None:
+        if stripe.state != TaskStripe.COMPLETED:
+            return
+        if not self._accordion_open:
+            self._set_accordion_open(True, animated=True)
+            return
+        stripe.reopen_from_completed()
+        if stripe in self.buttons:
+            self.buttons.remove(stripe)
+            self.buttons.append(stripe)
+        stripe.raise_()
+        self.recenter_ui(animated=True)
+        self._save_current_day()
+
+    def on_delete_requested(self, stripe: TaskStripe) -> None:
+        if stripe not in self.buttons or stripe.is_deleting:
+            return
+        self._interrupt_and_snap_animations()
+        epoch = self._animation_epoch
+        stripe.begin_delete_visual()
+        start_rect = QRect(stripe.geometry())
+        drop_rect = QRect(start_rect)
+        drop_rect.moveTop(start_rect.y() + max(120, int(self.height() * 0.24)))
+
+        # Stage 1: immediate red shift.
+        red_shift = QVariantAnimation(self)
+        red_shift.setDuration(120)
+        red_shift.setStartValue(0.0)
+        red_shift.setEndValue(1.0)
+        red_shift.setEasingCurve(QEasingCurve.Type.OutCubic)
+        red_shift.valueChanged.connect(lambda v: stripe.set_delete_progress(float(v)))
+
+        # Stage 2: drop.
+        drop_anim = QPropertyAnimation(stripe, b"geometry", self)
+        drop_anim.setDuration(360)
+        drop_anim.setStartValue(start_rect)
+        drop_anim.setEndValue(drop_rect)
+        drop_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        # Stage 3: dissolve while dropping.
+        fade_anim = QVariantAnimation(self)
+        fade_anim.setDuration(360)
+        fade_anim.setStartValue(1.0)
+        fade_anim.setEndValue(0.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        fade_anim.valueChanged.connect(lambda v: stripe.set_delete_opacity(float(v)))
+
+        parallel = QParallelAnimationGroup(self)
+        parallel.addAnimation(drop_anim)
+        parallel.addAnimation(fade_anim)
+
+        sequence = QSequentialAnimationGroup(self)
+        sequence.addAnimation(red_shift)
+        sequence.addAnimation(parallel)
+
+        self._register_animation(drop_anim, stripe, drop_rect)
+        self._register_animation(sequence)
+
+        def finalize_delete() -> None:
+            if epoch != self._animation_epoch:
+                return
+            if stripe in self.buttons:
+                self.buttons.remove(stripe)
+            try:
+                stripe.setParent(None)
+                stripe.deleteLater()
+            except RuntimeError:
+                pass
+            if not self.buttons:
+                self.add_task_stripe(animate=False)
+            if not any(b.state == TaskStripe.COMPLETED for b in self.buttons):
+                self._accordion_open = False
+            self.recenter_ui(animated=True, interrupt=False)
+            self._save_current_day()
+
+        sequence.finished.connect(finalize_delete)
+        sequence.start()
 
     def on_stripe_state_changed(self) -> None:
+        if self._loading_state or self._suppress_state_signal:
+            return
         stripe = self.sender()
         if isinstance(stripe, TaskStripe):
             if stripe.state == TaskStripe.COMPLETED and stripe.completion_rank is None:
@@ -569,27 +1114,41 @@ class LemonDoWidget(QWidget):
                 return
             elif stripe.state != TaskStripe.COMPLETED and stripe.completion_rank is not None:
                 stripe.completion_rank = None
-        self.relayout_stripes(animated=True)
+                stripe.completion_fade = 0.0
+        if not any(b.state == TaskStripe.COMPLETED for b in self.buttons):
+            self._accordion_open = False
+        self._save_current_day()
+        self.recenter_ui(animated=True)
 
     def _compute_layout_targets(self) -> tuple[dict[TaskStripe, QRect], QRect | None, int, bool]:
         wrapper_width = max(0, self.stripe_wrapper.width())
-        completed = [b for b in self.buttons if b.state == TaskStripe.COMPLETED]
+        completed = [b for b in self.buttons if b.state == TaskStripe.COMPLETED and not b.is_deleting]
         completed.sort(key=lambda b: b.completion_rank if b.completion_rank is not None else 10**9)
-        active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED]
-
-        title_bottom = self.title.y() + self.title.height()
-        # Reserve a clean "stack bay" above the active list.
-        active_anchor_y = max(0, title_bottom + 18)
-        completed_anchor_y = max(0, active_anchor_y - 38)
+        active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+        wrapper_top_in_window = self.stripe_wrapper.mapTo(self, QPoint(0, 0)).y()
+        completed_anchor_y = max(0, int(self.height() * 0.25) - wrapper_top_in_window)
+        active_anchor_y = max(0, int(self.height() * 0.40) - wrapper_top_in_window)
         targets: dict[TaskStripe, QRect] = {}
 
         completed_bottom = completed_anchor_y
         for idx, stripe in enumerate(completed):
-            y = completed_anchor_y + idx * self.completed_step
+            step = stripe.height() + self.stripe_gap + 2 if self._accordion_open else self.completed_step
+            y = completed_anchor_y + idx * step
             targets[stripe] = QRect(0, y, wrapper_width, stripe.height())
             completed_bottom = max(completed_bottom, y + stripe.height())
 
-        active_start_y = completed_bottom + self.stripe_gap if completed else active_anchor_y
+        if active:
+            active_total_height = sum(s.height() for s in active) + self.stripe_gap * max(0, len(active) - 1)
+            # Let active stack breathe around the 40% anchor by shifting some height upward.
+            proposed_top = max(0, active_anchor_y - int(active_total_height * 0.35))
+        else:
+            active_total_height = 0
+            proposed_top = active_anchor_y
+        if completed:
+            # Floating buffer: active zone must remain exactly 150px below completed stack bottom.
+            active_start_y = max(0, completed_bottom + 150)
+        else:
+            active_start_y = proposed_top
         current_y = active_start_y
         for idx, stripe in enumerate(active):
             if idx > 0:
@@ -603,27 +1162,38 @@ class LemonDoWidget(QWidget):
             last_rect = QRect(0, current_y, wrapper_width, last_active.height())
             add_y = last_rect.y() + last_rect.height() + self.add_button_gap
         elif completed and show_add:
-            add_y = completed_bottom + self.add_button_gap
+            add_y = max(completed_bottom + 150, active_anchor_y) + self.add_button_gap
         else:
-            add_y = self.add_button_gap
+            add_y = active_anchor_y + self.add_button_gap
         add_x = max(0, (wrapper_width - self.add_task_button.width()) // 2)
         if show_add:
             add_target = QRect(add_x, add_y, self.add_task_button.width(), self.add_task_button.height())
-        if show_add:
-            wrapper_height = add_y + self.add_task_button.height() + 4
-        elif active:
-            wrapper_height = current_y + active[-1].height() + 4
-        elif completed:
-            wrapper_height = completed_bottom + 4
-        else:
-            wrapper_height = 4
+        wrapper_height = max(
+            completed_bottom + 4 if completed else 4,
+            current_y + active[-1].height() + 4 if active else 4,
+            add_y + self.add_task_button.height() + 4 if show_add else 4,
+        )
         return targets, add_target, wrapper_height, show_add
+
+    def _set_accordion_open(self, open_state: bool, animated: bool = True) -> None:
+        if self._accordion_open == open_state:
+            return
+        self._accordion_open = open_state
+        self.recenter_ui(animated=animated)
+
+    def recenter_ui(self, animated: bool = True, interrupt: bool = True) -> None:
+        if animated and interrupt:
+            self._interrupt_and_snap_animations()
+        self.relayout_stripes(animated=animated)
+        self._resize_window_to_fit(animated=animated)
 
     def relayout_stripes(self, animated: bool = False) -> None:
         if not hasattr(self, "stripe_wrapper"):
             return
         targets, add_target, wrapper_height, show_add = self._compute_layout_targets()
-        self.stripe_wrapper.setFixedHeight(wrapper_height)
+        self._last_layout_targets = {k: QRect(v) for k, v in targets.items()}
+        self._last_add_target = QRect(add_target) if add_target is not None else None
+        self.stripe_wrapper.setFixedHeight(self._compute_animation_bounds(targets, add_target, wrapper_height))
         self.add_task_button.setVisible(show_add)
         if add_target is not None and not animated:
             self.add_task_button.setGeometry(add_target)
@@ -640,7 +1210,10 @@ class LemonDoWidget(QWidget):
                 anim.setDuration(320 if stripe.state == TaskStripe.COMPLETED else 260)
                 anim.setStartValue(start_rect)
                 anim.setEndValue(target)
-                anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+                anim.setEasingCurve(
+                    QEasingCurve.Type.OutCubic if self._accordion_open and stripe.state == TaskStripe.COMPLETED else QEasingCurve.Type.InOutQuart
+                )
+                self._register_animation(anim, stripe, target)
                 anim.start()
                 self._stack_animations.append(anim)
             else:
@@ -653,13 +1226,16 @@ class LemonDoWidget(QWidget):
                 anim.setStartValue(self.add_task_button.geometry())
                 anim.setEndValue(add_target)
                 anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+                self._register_animation(anim, self.add_task_button, add_target)
                 anim.start()
                 self._stack_animations.append(anim)
             self.add_task_button.raise_()
 
     def _animate_add_task_sequence(self, new_stripe: TaskStripe) -> None:
+        self._interrupt_and_snap_animations()
+        epoch = self._animation_epoch
         targets, add_target, wrapper_height, show_add = self._compute_layout_targets()
-        self.stripe_wrapper.setFixedHeight(wrapper_height)
+        self.stripe_wrapper.setFixedHeight(self._compute_animation_bounds(targets, add_target, wrapper_height))
         self.add_task_button.setVisible(show_add)
         self._resize_window_to_fit(animated=False)
         if new_stripe not in targets:
@@ -676,6 +1252,12 @@ class LemonDoWidget(QWidget):
         wrapper_width = max(0, self.stripe_wrapper.width())
         target = targets[new_stripe]
         start_rect = QRect(wrapper_width + 24, target.y(), target.width(), target.height())
+        predicted_wrapper_height = max(
+            self.stripe_wrapper.height(),
+            start_rect.y() + start_rect.height() + 8,
+            (add_target.y() + add_target.height() + 8) if (show_add and add_target is not None) else 0,
+        )
+        self.stripe_wrapper.setFixedHeight(predicted_wrapper_height)
         new_stripe.setGeometry(start_rect)
         new_stripe.raise_()
         self.add_task_button.setEnabled(False)
@@ -695,6 +1277,7 @@ class LemonDoWidget(QWidget):
             drop_anim.setEndValue(btn_drop)
             drop_anim.setEasingCurve(QEasingCurve.Type.OutBack)
             master.addAnimation(drop_anim)
+            self._register_animation(drop_anim, self.add_task_button, btn_drop)
 
             settle_anim = QPropertyAnimation(self.add_task_button, b"geometry", self)
             settle_anim.setDuration(220)
@@ -706,6 +1289,7 @@ class LemonDoWidget(QWidget):
             delay_settle.addAnimation(settle_anim)
             master.addAnimation(delay_settle)
             self._stack_animations.extend([drop_anim, settle_anim, delay_settle])
+            self._register_animation(settle_anim, self.add_task_button, add_target)
 
         # Stage B (150-600ms): stripe slides in from the right.
         bezier = QEasingCurve(QEasingCurve.Type.BezierSpline)
@@ -721,33 +1305,25 @@ class LemonDoWidget(QWidget):
         delay_group.addAnimation(slide_anim)
         master.addAnimation(delay_group)
         self._stack_animations.extend([delay_group, slide_anim])
+        self._register_animation(slide_anim, new_stripe, target)
 
         def finish_add() -> None:
-            self.relayout_stripes(animated=False)
-            self._resize_window_to_fit(animated=False)
-            if show_add and add_target is not None:
-                self.add_task_button.setGeometry(add_target)
-            self.add_task_button.raise_()
+            if epoch != self._animation_epoch or self._loading_state:
+                return
+            self.recenter_ui(animated=True, interrupt=False)
             self.add_task_button.setEnabled(True)
 
         master.finished.connect(finish_add)
         master.start()
 
     def _animate_completion_sequence(self, completed_stripe: TaskStripe) -> None:
+        self._interrupt_and_snap_animations()
+        epoch = self._animation_epoch
         # Freeze layout to prevent one-frame lurch while we run absolute-position animation.
         self.main_layout.setEnabled(False)
         targets, add_target, wrapper_height, show_add = self._compute_layout_targets()
         # Keep wrapper tall enough for both current and target positions to avoid clipping/truncation.
-        current_bottom = 0
-        for stripe in self.buttons:
-            current_bottom = max(current_bottom, stripe.geometry().y() + stripe.geometry().height())
-        current_bottom = max(current_bottom, self.add_task_button.geometry().y() + self.add_task_button.height())
-        target_bottom = 0
-        for rect in targets.values():
-            target_bottom = max(target_bottom, rect.y() + rect.height())
-        if show_add and add_target is not None:
-            target_bottom = max(target_bottom, add_target.y() + add_target.height())
-        self.stripe_wrapper.setFixedHeight(max(wrapper_height, current_bottom + 4, target_bottom + 4))
+        self.stripe_wrapper.setFixedHeight(self._compute_animation_bounds(targets, add_target, wrapper_height))
         self.add_task_button.setVisible(show_add)
         if completed_stripe not in targets:
             self.main_layout.setEnabled(True)
@@ -772,6 +1348,8 @@ class LemonDoWidget(QWidget):
         fade.setEasingCurve(QEasingCurve.Type.InOutQuart)
 
         def on_fade(value) -> None:
+            if epoch != self._animation_epoch or self._loading_state:
+                return
             completed_stripe.completion_fade = float(value)
             completed_stripe.apply_theme(self.button_color)
 
@@ -780,43 +1358,22 @@ class LemonDoWidget(QWidget):
         # Step 2 (400ms-900ms): completed task slides to the pile.
         start_rect = completed_stripe.geometry()
         end_rect = QRect(targets[completed_stripe])
-        if end_rect.y() >= start_rect.y():
-            end_rect.moveTop(max(0, start_rect.y() - 8))
         slide_to_pile = QPropertyAnimation(completed_stripe, b"geometry", self)
         slide_to_pile.setDuration(500)
         slide_to_pile.setStartValue(start_rect)
         slide_to_pile.setEndValue(end_rect)
         slide_to_pile.setEasingCurve(QEasingCurve.Type.InOutQuart)
+        self._register_animation(slide_to_pile, completed_stripe, end_rect)
 
         # Step 3 (900ms-1400ms): reshuffle remaining tasks + plus button.
 
         def start_reshuffle() -> None:
-            self._stack_animations = []
-            for stripe, target in targets.items():
-                if stripe is completed_stripe:
-                    stripe.setGeometry(target)
-                    stripe.raise_()
-                    continue
-                stripe.lower()
-                anim = QPropertyAnimation(stripe, b"geometry", self)
-                anim.setDuration(500)
-                anim.setStartValue(stripe.geometry())
-                anim.setEndValue(target)
-                anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
-                anim.start()
-                self._stack_animations.append(anim)
-
-            if show_add and add_target is not None:
-                add_anim = QPropertyAnimation(self.add_task_button, b"geometry", self)
-                add_anim.setDuration(500)
-                add_anim.setStartValue(self.add_task_button.geometry())
-                add_anim.setEndValue(add_target)
-                add_anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
-                add_anim.start()
-                self._stack_animations.append(add_anim)
-                self.add_task_button.raise_()
-
-            self._resize_window_to_fit(animated=True)
+            if epoch != self._animation_epoch or self._loading_state:
+                self._finish_completion_sequence()
+                return
+            completed_stripe.setGeometry(targets[completed_stripe])
+            completed_stripe.raise_()
+            self.recenter_ui(animated=True, interrupt=False)
             if self._stack_animations:
                 self._stack_animations[0].finished.connect(self._finish_completion_sequence)
             else:
@@ -836,6 +1393,7 @@ class LemonDoWidget(QWidget):
         self.main_layout.activate()
         self.relayout_stripes(animated=False)
         self._resize_window_to_fit(animated=False)
+        self._save_current_day()
 
     def _resize_window_to_fit(self, animated: bool) -> None:
         self.layout().activate()
@@ -902,6 +1460,15 @@ class LemonDoWidget(QWidget):
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
+        if key == Qt.Key.Key_Tab:
+            available = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+            if not available:
+                self.add_task_stripe(animate=True)
+                if self.buttons:
+                    newest = self.buttons[-1]
+                    QTimer.singleShot(520, newest.focus_for_input)
+                event.accept()
+                return
         if key == Qt.Key.Key_Right:
             self.time_offset += timedelta(hours=1)
         elif key == Qt.Key.Key_Left:
@@ -921,6 +1488,14 @@ class LemonDoWidget(QWidget):
             self.toggle_add_button_visibility()
             event.accept()
             return
+        elif key == Qt.Key.Key_P:
+            self.toggle_history_controls()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_N:
+            self.nuke_all_task_data()
+            event.accept()
+            return
         elif key == Qt.Key.Key_Escape:
             self.close()
             return
@@ -933,10 +1508,24 @@ class LemonDoWidget(QWidget):
 
     def toggle_add_button_visibility(self) -> None:
         self.add_button_visible = not self.add_button_visible
-        self.relayout_stripes(animated=True)
-        self._resize_window_to_fit(animated=True)
+        self.recenter_ui(animated=True)
+
+    def nuke_all_task_data(self) -> None:
+        self._interrupt_and_snap_animations()
+        self.particles.clear()
+        if hasattr(self, "particle_timer"):
+            self.particle_timer.stop()
+        with self.db:
+            self.db.execute("DELETE FROM tasks")
+        self.view_date = self._navigation_today()
+        self.today_date = self.get_app_time().date()
+        self._load_day(self.view_date)
+        self._update_nav_buttons()
+        if hasattr(self, "particle_overlay"):
+            self.particle_overlay.update()
 
     def update_color_state(self) -> None:
+        self._check_for_new_day()
         m = minute_of_day(self.get_app_time())
         target_bg, target_button, target_sleep, target_text, segment = self._compute_target_state(m)
         if self.current_segment is None:
@@ -1048,6 +1637,10 @@ class LemonDoWidget(QWidget):
         self.sleep_label.setStyleSheet(
             f"font-size: 20px; font-weight: 600; color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
+        self.day_label.setStyleSheet(
+            "font-size: 11px; font-weight: 700; letter-spacing: 0.6px;"
+            f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
+        )
 
         if in_transition:
             # Keep lockout label hidden during fades; show only in settled sleep mode.
@@ -1083,7 +1676,25 @@ class LemonDoWidget(QWidget):
             "border: 1px solid rgba(255, 255, 255, 155);"
             "}"
         )
+        nav_bg = lerp_color(self.button_color, QColor("#000000"), 0.18)
+        nav_text = get_contrast_color(nav_bg)
+        nav_css = (
+            "QPushButton {"
+            f"background-color: rgba({nav_bg.red()}, {nav_bg.green()}, {nav_bg.blue()}, 185);"
+            f"color: rgb({nav_text.red()}, {nav_text.green()}, {nav_text.blue()});"
+            "border: 1px solid rgba(255, 255, 255, 95);"
+            "border-radius: 14px;"
+            "font-weight: 700;"
+            "padding: 0px;"
+            "}"
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 48); }"
+            "QPushButton:disabled { opacity: 0.45; }"
+        )
+        self.back_button.setStyleSheet(nav_css)
+        self.forward_button.setStyleSheet(nav_css)
         self.add_task_button.raise_()
+        if hasattr(self, "particle_overlay"):
+            self.particle_overlay.raise_()
 
     def spawn_confetti(self, global_pos: QPoint) -> None:
         if self.sleep_mode:
@@ -1119,6 +1730,9 @@ class LemonDoWidget(QWidget):
 
         if not self.particle_timer.isActive():
             self.particle_timer.start()
+        if hasattr(self, "particle_overlay"):
+            self.particle_overlay.raise_()
+            self.particle_overlay.update()
         self.update()
 
     def update_particles(self) -> None:
@@ -1137,6 +1751,9 @@ class LemonDoWidget(QWidget):
         self.particles = alive
         if not self.particles:
             self.particle_timer.stop()
+        if hasattr(self, "particle_overlay"):
+            self.particle_overlay.raise_()
+            self.particle_overlay.update()
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -1156,14 +1773,7 @@ class LemonDoWidget(QWidget):
         painter.setPen(QPen(outer_border, 1.4))
         painter.drawPath(self.pill_path)
 
-        # Confetti particles rendered above UI.
-        for p in self.particles:
-            alpha = int(max(0, min(255, p.life * 255)))
-            c = QColor(p.color)
-            c.setAlpha(alpha)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(c)
-            painter.drawEllipse(p.pos, p.radius, p.radius)
+        # Particle rendering is handled by ParticleOverlay (top-most layer).
 
 
 def main() -> None:
