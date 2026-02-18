@@ -2,7 +2,7 @@ import math
 import random
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtCore import (
     QAbstractAnimation,
@@ -17,7 +17,14 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QRegion
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QInputDialog,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 def lerp_color(start: QColor, end: QColor, t: float) -> QColor:
@@ -44,7 +51,13 @@ class Particle:
 
 
 class TaskButton(QPushButton):
+    EMPTY = "EMPTY"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+
     completed = pyqtSignal(QPoint)
+    request_task_input = pyqtSignal(object)
+    force_reset = pyqtSignal(object)
 
     def __init__(self, text: str, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
@@ -53,10 +66,88 @@ class TaskButton(QPushButton):
         self.setMaximumHeight(68)
         self.clicked.connect(self._on_clicked)
         self._anim_group: QSequentialAnimationGroup | None = None
+        self.state = self.EMPTY
+        self.task_text = ""
+        self._last_base_color = QColor("#1A237E")
+        self.setText("Click to add task")
 
     def _on_clicked(self) -> None:
+        if self.state == self.COMPLETED:
+            return
+        if self.state == self.EMPTY:
+            self.request_task_input.emit(self)
+            return
+
         self.play_bounce_animation()
         self.completed.emit(QCursor.pos())
+        self.set_completed()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            self.reset_slot()
+            self.force_reset.emit(self)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def set_active(self, task_text: str) -> None:
+        clean_text = task_text.strip()
+        if not clean_text:
+            return
+        self.state = self.ACTIVE
+        self.task_text = clean_text
+        self.setText(clean_text)
+
+    def set_completed(self) -> None:
+        self.state = self.COMPLETED
+        if self.task_text:
+            self.setText(self.task_text)
+        self.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self.apply_style(self._last_base_color)
+
+    def reset_slot(self) -> None:
+        self.state = self.EMPTY
+        self.task_text = ""
+        self.setText("Click to add task")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_style(self._last_base_color)
+
+    def apply_style(self, base_color: QColor) -> None:
+        self._last_base_color = QColor(base_color)
+        if self.state == self.COMPLETED:
+            css = (
+                "QPushButton {"
+                "background-color: rgba(60, 60, 60, 130);"
+                "color: rgb(165, 165, 165);"
+                "font-size: 20px;"
+                "font-weight: 700;"
+                "text-decoration: line-through;"
+                "border: 1px solid rgba(180, 180, 180, 90);"
+                "border-radius: 34px;"
+                "padding: 12px 20px;"
+                "}"
+            )
+        else:
+            hover = lerp_color(base_color, QColor("#FFFFFF"), 0.14)
+            css = (
+                "QPushButton {"
+                f"background-color: rgb({base_color.red()}, {base_color.green()}, {base_color.blue()});"
+                "color: white;"
+                "font-size: 20px;"
+                "font-weight: 700;"
+                "border: none;"
+                "border-radius: 34px;"
+                "padding: 12px 20px;"
+                "}"
+                "QPushButton:hover {"
+                f"background-color: rgb({hover.red()}, {hover.green()}, {hover.blue()});"
+                "}"
+                "QPushButton:pressed {"
+                "padding-top: 14px;"
+                "padding-bottom: 10px;"
+                "}"
+            )
+        self.setStyleSheet(css)
 
     def play_bounce_animation(self) -> None:
         original = self.geometry()
@@ -116,11 +207,14 @@ class LemonDoWidget(QWidget):
         self.button_color = self.MORNING_BUTTON
         self.text_color = QColor("#111111")
         self.sleep_mode = False
+        self.time_offset = timedelta(0)
 
         self._drag_offset: QPoint | None = None
         self.particles: list[Particle] = []
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._build_ui()
+        self._position_debug_overlay()
         self._setup_timers()
         self.update_color_state()
 
@@ -133,6 +227,19 @@ class LemonDoWidget(QWidget):
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title.setStyleSheet("font-size: 30px; font-weight: 700;")
 
+        self.debug_label = QLabel(self)
+        self.debug_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.debug_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.debug_label.setStyleSheet(
+            "font-size: 11px;"
+            "font-weight: 700;"
+            "padding: 4px 10px;"
+            "border-radius: 10px;"
+            "color: rgb(245, 245, 245);"
+            "background-color: rgba(0, 0, 0, 115);"
+        )
+        self.debug_label.raise_()
+
         self.sleep_label = QLabel("Go to bed, come back tomorrow.")
         self.sleep_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sleep_label.setWordWrap(True)
@@ -143,6 +250,8 @@ class LemonDoWidget(QWidget):
         for i in range(3):
             btn = TaskButton(f"Task Slot {i + 1}", self)
             btn.completed.connect(self.spawn_confetti)
+            btn.request_task_input.connect(self.open_task_input_dialog)
+            btn.force_reset.connect(self.on_slot_force_reset)
             self.buttons.append(btn)
 
         layout.addWidget(self.title)
@@ -172,10 +281,27 @@ class LemonDoWidget(QWidget):
         path.addRoundedRect(QRectF(self.rect()), radius, radius)
         region = QRegion(path.toFillPolygon().toPolygon())
         self.setMask(region)
+        self._position_debug_overlay()
+
+    def _position_debug_overlay(self) -> None:
+        overlay_w = 160
+        overlay_h = 26
+        x = int((self.width() - overlay_w) / 2)
+        y = 10
+        self.debug_label.setGeometry(x, y, overlay_w, overlay_h)
+
+    def get_app_time(self) -> datetime:
+        return datetime.now() + self.time_offset
+
+    def update_debug_overlay(self) -> None:
+        app_time = self.get_app_time()
+        self.debug_label.setText(f"DEBUG TIME: {app_time:%H:%M}")
+        self.debug_label.raise_()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -191,8 +317,30 @@ class LemonDoWidget(QWidget):
         self._drag_offset = None
         super().mouseReleaseEvent(event)
 
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key.Key_Right:
+            self.time_offset += timedelta(hours=1)
+        elif key == Qt.Key.Key_Left:
+            self.time_offset -= timedelta(hours=1)
+        elif key == Qt.Key.Key_Up:
+            self.time_offset += timedelta(minutes=10)
+        elif key == Qt.Key.Key_Down:
+            self.time_offset -= timedelta(minutes=10)
+        elif key == Qt.Key.Key_R:
+            self.time_offset = timedelta(0)
+        elif key == Qt.Key.Key_Escape:
+            self.close()
+            return
+        else:
+            super().keyPressEvent(event)
+            return
+
+        self.update_color_state()
+        event.accept()
+
     def update_color_state(self) -> None:
-        m = minute_of_day(datetime.now())
+        m = minute_of_day(self.get_app_time())
 
         if 240 <= m < 960:
             # Phase 1: 04:00 -> 16:00
@@ -224,6 +372,7 @@ class LemonDoWidget(QWidget):
             self.text_color = QColor("#101010" if brightness > 140 else "#F5F5F5")
 
         self.apply_dynamic_styles()
+        self.update_debug_overlay()
         self.update()
 
     def apply_dynamic_styles(self) -> None:
@@ -234,25 +383,6 @@ class LemonDoWidget(QWidget):
             f"font-size: 20px; font-weight: 600; color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
 
-        button_css = (
-            "QPushButton {"
-            f"background-color: rgb({self.button_color.red()}, {self.button_color.green()}, {self.button_color.blue()});"
-            "color: white;"
-            "font-size: 20px;"
-            "font-weight: 700;"
-            "border: none;"
-            "border-radius: 34px;"
-            "padding: 12px 20px;"
-            "}"
-            "QPushButton:hover {"
-            "filter: brightness(1.1);"
-            "}"
-            "QPushButton:pressed {"
-            "padding-top: 14px;"
-            "padding-bottom: 10px;"
-            "}"
-        )
-
         if self.sleep_mode:
             for btn in self.buttons:
                 btn.hide()
@@ -260,8 +390,20 @@ class LemonDoWidget(QWidget):
         else:
             for btn in self.buttons:
                 btn.show()
-                btn.setStyleSheet(button_css)
+                btn.apply_style(self.button_color)
             self.sleep_label.hide()
+
+    def open_task_input_dialog(self, button: TaskButton) -> None:
+        if self.sleep_mode or button.state != TaskButton.EMPTY:
+            return
+        task_text, ok = QInputDialog.getText(self, "Add Task", "Task:")
+        if ok and task_text.strip():
+            button.set_active(task_text)
+            button.apply_style(self.button_color)
+
+    def on_slot_force_reset(self, button: TaskButton) -> None:
+        # Dev helper: right click restores Stage 1 instantly.
+        button.apply_style(self.button_color)
 
     def spawn_confetti(self, global_pos: QPoint) -> None:
         if self.sleep_mode:
