@@ -574,6 +574,7 @@ class LemonDoWidget(QWidget):
         self._hibernate_hovered = False
         self._hibernate_anim_group: QParallelAnimationGroup | None = None
         self._ui_fade_anims: list[QPropertyAnimation] = []
+        self._pre_hibernate_min_size: tuple[int, int] | None = None
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -587,9 +588,7 @@ class LemonDoWidget(QWidget):
         self._position_debug_overlay()
         self._setup_shortcuts()
         self._setup_timers()
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
+        self.installEventFilter(self)
         self._reset_idle_timer()
         self._load_day(self.view_date)
         self.update_color_state()
@@ -832,8 +831,15 @@ class LemonDoWidget(QWidget):
 
     def _handle_tab_hotkey(self) -> bool:
         available = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+        empty_available = [b for b in available if b.state == TaskStripe.EMPTY]
         if not available:
-            self.add_task_stripe(animate=True)
+            self.add_task()
+            if self.buttons:
+                newest = self.buttons[-1]
+                QTimer.singleShot(520, newest.focus_for_input)
+            return True
+        if not empty_available:
+            self.add_task()
             if self.buttons:
                 newest = self.buttons[-1]
                 QTimer.singleShot(520, newest.focus_for_input)
@@ -1030,6 +1036,10 @@ class LemonDoWidget(QWidget):
             return
         self._interrupt_and_snap_animations()
         self._hibernate_saved_geometry = QRect(self.geometry())
+        if self._pre_hibernate_min_size is None:
+            ms = self.minimumSize()
+            self._pre_hibernate_min_size = (ms.width(), ms.height())
+        self.setMinimumSize(1, 1)
         self.is_hibernated = True
         self._hibernate_hovered = False
         self.stripe_wrapper.hide()
@@ -1089,6 +1099,8 @@ class LemonDoWidget(QWidget):
         self._hibernate_anim_group = group
 
         def after_exit() -> None:
+            if self._pre_hibernate_min_size is not None:
+                self.setMinimumSize(self._pre_hibernate_min_size[0], self._pre_hibernate_min_size[1])
             self.title.show()
             self.stripe_wrapper.show()
             self.apply_dynamic_styles()
@@ -1163,6 +1175,9 @@ class LemonDoWidget(QWidget):
             self._animate_add_task_sequence(stripe)
         else:
             self.recenter_ui(animated=False)
+
+    def add_task(self) -> None:
+        self.add_task_stripe(animate=True)
 
     def _create_task_stripe(self) -> TaskStripe:
         stripe = TaskStripe(self.stripe_wrapper)
@@ -1297,7 +1312,7 @@ class LemonDoWidget(QWidget):
             if stripe.state == TaskStripe.COMPLETED and stripe.completion_rank is None:
                 stripe.completion_rank = self._completed_counter
                 self._completed_counter += 1
-                self._animate_completion_sequence(stripe)
+                self.complete_task(stripe)
                 return
             elif stripe.state != TaskStripe.COMPLETED and stripe.completion_rank is not None:
                 stripe.completion_rank = None
@@ -1306,6 +1321,9 @@ class LemonDoWidget(QWidget):
             self._accordion_open = False
         self._save_current_day()
         self.recenter_ui(animated=True)
+
+    def complete_task(self, completed_stripe: TaskStripe) -> None:
+        self._animate_completion_sequence(completed_stripe)
 
     def _compute_layout_targets(self) -> tuple[dict[TaskStripe, QRect], QRect | None, int, bool]:
         wrapper_width = max(0, self.stripe_wrapper.width())
@@ -1533,6 +1551,9 @@ class LemonDoWidget(QWidget):
         snapshot[self.stripe_wrapper] = QRect(wrapper_local.x(), wrapper_local.y(), self.stripe_wrapper.width(), self.stripe_wrapper.height())
         for widget, rect in snapshot.items():
             widget.setGeometry(rect)
+        for stripe in self.buttons:
+            stripe.move(snapshot[stripe].topLeft())
+        self.add_task_button.move(snapshot[self.add_task_button].topLeft())
 
         completed_stripe.raise_()
         # Step 1 (0ms-400ms): celebration + grey-out fade; no movement.
@@ -1551,28 +1572,52 @@ class LemonDoWidget(QWidget):
         fade.valueChanged.connect(on_fade)
 
         # Step 2 (400ms-900ms): completed task slides to the pile.
-        start_rect = completed_stripe.geometry()
-        end_rect = QRect(targets[completed_stripe])
-        slide_to_pile = QPropertyAnimation(completed_stripe, b"geometry", self)
+        start_pos = completed_stripe.pos()
+        end_pos = targets[completed_stripe].topLeft()
+        slide_to_pile = QPropertyAnimation(completed_stripe, b"pos", self)
         slide_to_pile.setDuration(500)
-        slide_to_pile.setStartValue(start_rect)
-        slide_to_pile.setEndValue(end_rect)
+        slide_to_pile.setStartValue(start_pos)
+        slide_to_pile.setEndValue(end_pos)
         slide_to_pile.setEasingCurve(QEasingCurve.Type.InOutQuart)
-        self._register_animation(slide_to_pile, completed_stripe, end_rect)
+        self._register_animation(slide_to_pile, completed_stripe, QRect(end_pos, completed_stripe.size()))
 
-        # Step 3 (900ms-1400ms): reshuffle remaining tasks + plus button.
+        # Step 3 (900ms-1400ms): final centering slide for all remaining widgets.
 
         def start_reshuffle() -> None:
             if epoch != self._animation_epoch or self._loading_state:
                 self._finish_completion_sequence()
                 return
-            completed_stripe.setGeometry(targets[completed_stripe])
+            completed_stripe.move(targets[completed_stripe].topLeft())
             completed_stripe.raise_()
-            self.recenter_ui(animated=True, interrupt=False)
-            if self._stack_animations:
-                self._stack_animations[0].finished.connect(self._finish_completion_sequence)
-            else:
+            settle_group = QParallelAnimationGroup(self)
+            self._stack_animations = [settle_group]
+
+            for stripe, target in targets.items():
+                if stripe is completed_stripe:
+                    continue
+                anim = QPropertyAnimation(stripe, b"pos", self)
+                anim.setDuration(420)
+                anim.setStartValue(stripe.pos())
+                anim.setEndValue(target.topLeft())
+                anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+                settle_group.addAnimation(anim)
+                self._register_animation(anim, stripe, target)
+
+            if show_add and add_target is not None:
+                add_anim = QPropertyAnimation(self.add_task_button, b"pos", self)
+                add_anim.setDuration(420)
+                add_anim.setStartValue(self.add_task_button.pos())
+                add_anim.setEndValue(add_target.topLeft())
+                add_anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+                settle_group.addAnimation(add_anim)
+                self._register_animation(add_anim, self.add_task_button, add_target)
+
+            if settle_group.animationCount() == 0:
                 self._finish_completion_sequence()
+                return
+
+            settle_group.finished.connect(self._finish_completion_sequence)
+            settle_group.start()
 
         slide_to_pile.finished.connect(start_reshuffle)
 
@@ -1592,6 +1637,8 @@ class LemonDoWidget(QWidget):
         self._save_current_day()
 
     def _resize_window_to_fit(self, animated: bool) -> None:
+        if self.is_hibernated:
+            return
         self.layout().activate()
         target_h = max(820, self.layout().sizeHint().height())
         target_w = max(300, self.width())
@@ -1863,6 +1910,16 @@ class LemonDoWidget(QWidget):
         anim.start()
 
     def apply_dynamic_styles(self, in_transition: bool = False) -> None:
+        if self.is_hibernated:
+            self.stripe_wrapper.hide()
+            self.add_task_button.hide()
+            self.sleep_label.hide()
+            self.title.hide()
+            self.back_button.hide()
+            self.forward_button.hide()
+            self.day_label.hide()
+            self.debug_label.hide()
+            return
         self.title.setStyleSheet(
             f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
