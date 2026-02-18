@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QAbstractAnimation,
+    QEvent,
     QEasingCurve,
     QPoint,
     QPointF,
@@ -567,6 +568,11 @@ class LemonDoWidget(QWidget):
         self.nav_controls_visible = False
         self.zone_separation = 26
         self._animation_epoch = 0
+        self._completion_in_progress = False
+        self.is_hibernated = False
+        self._hibernate_saved_geometry: QRect | None = None
+        self._hibernate_hovered = False
+        self._hibernate_anim_group: QParallelAnimationGroup | None = None
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -580,6 +586,10 @@ class LemonDoWidget(QWidget):
         self._position_debug_overlay()
         self._setup_shortcuts()
         self._setup_timers()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        self._reset_idle_timer()
         self._load_day(self.view_date)
         self.update_color_state()
 
@@ -677,6 +687,10 @@ class LemonDoWidget(QWidget):
         self.particle_timer = QTimer(self)
         self.particle_timer.setInterval(16)
         self.particle_timer.timeout.connect(self.update_particles)
+        self.idle_timer = QTimer(self)
+        self.idle_timer.setSingleShot(True)
+        self.idle_timer.setInterval(600_000)
+        self.idle_timer.timeout.connect(self.enter_hibernate)
 
     def _setup_shortcuts(self) -> None:
         self.toggle_add_shortcut = QShortcut(QKeySequence("A"), self)
@@ -696,6 +710,9 @@ class LemonDoWidget(QWidget):
 
     def closeEvent(self, event) -> None:
         self._save_current_day()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         try:
             self.db.close()
         except Exception:
@@ -804,6 +821,39 @@ class LemonDoWidget(QWidget):
     def _navigation_today(self) -> date:
         # Navigation should be anchored to real calendar day, not debug time offset.
         return date.today()
+
+    def _reset_idle_timer(self) -> None:
+        if not hasattr(self, "idle_timer"):
+            return
+        if self.is_hibernated:
+            return
+        self.idle_timer.start()
+
+    def _handle_tab_hotkey(self) -> bool:
+        available = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+        if not available:
+            self.add_task_stripe(animate=True)
+            if self.buttons:
+                newest = self.buttons[-1]
+                QTimer.singleShot(520, newest.focus_for_input)
+            return True
+        focused = next((b for b in available if b.editor.hasFocus()), None)
+        if focused is not None:
+            self.on_focus_move_requested(focused, 1)
+            return True
+        available[0].focus_for_input()
+        return True
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            self._reset_idle_timer()
+            if event.key() == Qt.Key.Key_Tab:
+                if self._handle_tab_hotkey():
+                    event.accept()
+                    return True
+        elif event.type() in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress}:
+            self._reset_idle_timer()
+        return super().eventFilter(obj, event)
 
     def navigate_days(self, delta: int) -> None:
         target = self.view_date + timedelta(days=delta)
@@ -924,8 +974,93 @@ class LemonDoWidget(QWidget):
         self._animation_targets.clear()
         if hasattr(self, "add_task_button"):
             self.add_task_button.setEnabled(True)
+        self._completion_in_progress = False
         self.main_layout.setEnabled(True)
         self.main_layout.activate()
+
+    def _hibernate_target_geometry(self) -> QRect:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return QRect(max(0, self.x()), max(0, self.y()), 30, 80)
+        area = screen.geometry()
+        w = 30
+        h = 80
+        right_margin = int(area.width() * 0.04)
+        bottom_margin = int(area.height() * 0.08)
+        x = area.right() - w - right_margin + 1
+        y = area.bottom() - h - bottom_margin + 1
+        return QRect(x, y, w, h)
+
+    def enter_hibernate(self) -> None:
+        if self.is_hibernated:
+            return
+        self._interrupt_and_snap_animations()
+        self._hibernate_saved_geometry = QRect(self.geometry())
+        self.is_hibernated = True
+        self._hibernate_hovered = False
+        self.stripe_wrapper.hide()
+        self.add_task_button.hide()
+        self.debug_label.hide()
+        self.sleep_label.hide()
+        self._position_title()
+
+        target = self._hibernate_target_geometry()
+        if self._hibernate_anim_group and self._hibernate_anim_group.state() == QAbstractAnimation.State.Running:
+            self._hibernate_anim_group.stop()
+        g_anim = QPropertyAnimation(self, b"geometry", self)
+        g_anim.setDuration(280)
+        g_anim.setStartValue(self.geometry())
+        g_anim.setEndValue(target)
+        g_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        o_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        o_anim.setDuration(280)
+        o_anim.setStartValue(float(self.windowOpacity()))
+        o_anim.setEndValue(0.2)
+        o_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(g_anim)
+        group.addAnimation(o_anim)
+        self._hibernate_anim_group = group
+        group.start()
+
+    def exit_hibernate(self) -> None:
+        if not self.is_hibernated:
+            return
+        target = QRect(self._hibernate_saved_geometry) if self._hibernate_saved_geometry is not None else QRect(self.geometry())
+        self.is_hibernated = False
+        if self._hibernate_anim_group and self._hibernate_anim_group.state() == QAbstractAnimation.State.Running:
+            self._hibernate_anim_group.stop()
+
+        g_anim = QPropertyAnimation(self, b"geometry", self)
+        g_anim.setDuration(240)
+        g_anim.setStartValue(self.geometry())
+        g_anim.setEndValue(target)
+        g_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+
+        o_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        o_anim.setDuration(240)
+        o_anim.setStartValue(float(self.windowOpacity()))
+        o_anim.setEndValue(1.0)
+        o_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(g_anim)
+        group.addAnimation(o_anim)
+        self._hibernate_anim_group = group
+
+        def after_exit() -> None:
+            self.stripe_wrapper.show()
+            self.apply_dynamic_styles()
+            self.recenter_ui(animated=False)
+            self._position_debug_overlay()
+            if self.debug_visible:
+                self.debug_label.show()
+            self._reset_idle_timer()
+
+        group.finished.connect(after_exit)
+        group.start()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -967,6 +1102,8 @@ class LemonDoWidget(QWidget):
         self.debug_label.setGeometry(x, y, overlay_w, overlay_h)
 
     def on_stripe_height_changed(self) -> None:
+        if self._completion_in_progress:
+            return
         self.recenter_ui(animated=False)
         self._position_debug_overlay()
 
@@ -1319,6 +1456,7 @@ class LemonDoWidget(QWidget):
     def _animate_completion_sequence(self, completed_stripe: TaskStripe) -> None:
         self._interrupt_and_snap_animations()
         epoch = self._animation_epoch
+        self._completion_in_progress = True
         # Freeze layout to prevent one-frame lurch while we run absolute-position animation.
         self.main_layout.setEnabled(False)
         targets, add_target, wrapper_height, show_add = self._compute_layout_targets()
@@ -1326,16 +1464,23 @@ class LemonDoWidget(QWidget):
         self.stripe_wrapper.setFixedHeight(self._compute_animation_bounds(targets, add_target, wrapper_height))
         self.add_task_button.setVisible(show_add)
         if completed_stripe not in targets:
+            self._completion_in_progress = False
             self.main_layout.setEnabled(True)
             self.relayout_stripes(animated=True)
             return
 
-        # Snapshot every geometry before movement starts.
+        # Snapshot absolute coordinates before movement starts.
         snapshot: dict[QWidget, QRect] = {}
         for stripe in self.buttons:
-            snapshot[stripe] = QRect(stripe.geometry())
-        snapshot[self.add_task_button] = QRect(self.add_task_button.geometry())
-        snapshot[self.stripe_wrapper] = QRect(self.stripe_wrapper.geometry())
+            global_tl = stripe.mapToGlobal(QPoint(0, 0))
+            local_tl = self.stripe_wrapper.mapFromGlobal(global_tl)
+            snapshot[stripe] = QRect(local_tl.x(), local_tl.y(), stripe.width(), stripe.height())
+        add_global = self.add_task_button.mapToGlobal(QPoint(0, 0))
+        add_local = self.stripe_wrapper.mapFromGlobal(add_global)
+        snapshot[self.add_task_button] = QRect(add_local.x(), add_local.y(), self.add_task_button.width(), self.add_task_button.height())
+        wrapper_global = self.stripe_wrapper.mapToGlobal(QPoint(0, 0))
+        wrapper_local = self.mapFromGlobal(wrapper_global)
+        snapshot[self.stripe_wrapper] = QRect(wrapper_local.x(), wrapper_local.y(), self.stripe_wrapper.width(), self.stripe_wrapper.height())
         for widget, rect in snapshot.items():
             widget.setGeometry(rect)
 
@@ -1389,6 +1534,7 @@ class LemonDoWidget(QWidget):
         self._stack_animations = [sequence]
 
     def _finish_completion_sequence(self) -> None:
+        self._completion_in_progress = False
         self.main_layout.setEnabled(True)
         self.main_layout.activate()
         self.relayout_stripes(animated=False)
@@ -1440,6 +1586,11 @@ class LemonDoWidget(QWidget):
         self.debug_label.raise_()
 
     def mousePressEvent(self, event) -> None:
+        self._reset_idle_timer()
+        if self.is_hibernated and event.button() == Qt.MouseButton.LeftButton:
+            self.exit_hibernate()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -1448,6 +1599,7 @@ class LemonDoWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        self._reset_idle_timer()
         if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
@@ -1458,15 +1610,39 @@ class LemonDoWidget(QWidget):
         self._drag_offset = None
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        self.enter_hibernate()
+        event.accept()
+
+    def enterEvent(self, event) -> None:
+        if self.is_hibernated:
+            self._hibernate_hovered = True
+            rect = self._hibernate_target_geometry()
+            scale = 1.05
+            nw = int(rect.width() * scale)
+            nh = int(rect.height() * scale)
+            hover_rect = QRect(
+                rect.x() - (nw - rect.width()) // 2,
+                rect.y() - (nh - rect.height()) // 2,
+                nw,
+                nh,
+            )
+            self.setGeometry(hover_rect)
+            self.setWindowOpacity(0.32)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self.is_hibernated and self._hibernate_hovered:
+            self._hibernate_hovered = False
+            self.setGeometry(self._hibernate_target_geometry())
+            self.setWindowOpacity(0.2)
+        super().leaveEvent(event)
+
     def keyPressEvent(self, event) -> None:
+        self._reset_idle_timer()
         key = event.key()
         if key == Qt.Key.Key_Tab:
-            available = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
-            if not available:
-                self.add_task_stripe(animate=True)
-                if self.buttons:
-                    newest = self.buttons[-1]
-                    QTimer.singleShot(520, newest.focus_for_input)
+            if self._handle_tab_hotkey():
                 event.accept()
                 return
         if key == Qt.Key.Key_Right:
