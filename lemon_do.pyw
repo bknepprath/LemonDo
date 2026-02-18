@@ -573,6 +573,7 @@ class LemonDoWidget(QWidget):
         self._hibernate_saved_geometry: QRect | None = None
         self._hibernate_hovered = False
         self._hibernate_anim_group: QParallelAnimationGroup | None = None
+        self._ui_fade_anims: list[QPropertyAnimation] = []
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -853,6 +854,11 @@ class LemonDoWidget(QWidget):
                     return True
         elif event.type() in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress}:
             self._reset_idle_timer()
+            if self.is_hibernated and self._hibernate_hovered:
+                if not self.geometry().contains(QCursor.pos()):
+                    self._hibernate_hovered = False
+                    self.setGeometry(self._hibernate_target_geometry())
+                    self.setWindowOpacity(0.2)
         return super().eventFilter(obj, event)
 
     def navigate_days(self, delta: int) -> None:
@@ -868,6 +874,11 @@ class LemonDoWidget(QWidget):
 
     def _update_nav_buttons(self) -> None:
         if not hasattr(self, "back_button"):
+            return
+        if self.is_hibernated:
+            self.back_button.hide()
+            self.forward_button.hide()
+            self.day_label.hide()
             return
         nav_today = self._navigation_today()
         self.back_button.setEnabled(True)
@@ -981,15 +992,38 @@ class LemonDoWidget(QWidget):
     def _hibernate_target_geometry(self) -> QRect:
         screen = QApplication.primaryScreen()
         if screen is None:
-            return QRect(max(0, self.x()), max(0, self.y()), 30, 80)
-        area = screen.geometry()
-        w = 30
-        h = 80
-        right_margin = int(area.width() * 0.04)
-        bottom_margin = int(area.height() * 0.08)
+            return QRect(max(0, self.x()), max(0, self.y()), 38, 30)
+        # Use availableGeometry so we stay above taskbar/docks.
+        area = screen.availableGeometry()
+        w = 38
+        h = 30
+        right_margin = int(area.width() * 0.025)
+        bottom_margin = int(area.height() * 0.12)
         x = area.right() - w - right_margin + 1
         y = area.bottom() - h - bottom_margin + 1
         return QRect(x, y, w, h)
+
+    def _fade_in_widgets(self, widgets: list[QWidget], duration: int = 230) -> None:
+        self._ui_fade_anims = []
+        for widget in widgets:
+            if widget is None or not widget.isVisible():
+                continue
+            effect = QGraphicsOpacityEffect(widget)
+            effect.setOpacity(0.0)
+            widget.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(duration)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+            def clear_effect(w=widget, e=effect) -> None:
+                if w.graphicsEffect() is e:
+                    w.setGraphicsEffect(None)
+
+            anim.finished.connect(clear_effect)
+            anim.start()
+            self._ui_fade_anims.append(anim)
 
     def enter_hibernate(self) -> None:
         if self.is_hibernated:
@@ -1002,6 +1036,10 @@ class LemonDoWidget(QWidget):
         self.add_task_button.hide()
         self.debug_label.hide()
         self.sleep_label.hide()
+        self.title.hide()
+        self.back_button.hide()
+        self.forward_button.hide()
+        self.day_label.hide()
         self._position_title()
 
         target = self._hibernate_target_geometry()
@@ -1051,12 +1089,24 @@ class LemonDoWidget(QWidget):
         self._hibernate_anim_group = group
 
         def after_exit() -> None:
+            self.title.show()
             self.stripe_wrapper.show()
             self.apply_dynamic_styles()
             self.recenter_ui(animated=False)
+            self._position_title()
+            self._update_nav_buttons()
             self._position_debug_overlay()
             if self.debug_visible:
                 self.debug_label.show()
+            fade_targets = [
+                self.title,
+                self.stripe_wrapper,
+                self.back_button,
+                self.forward_button,
+                self.day_label,
+                self.debug_label,
+            ]
+            self._fade_in_widgets(fade_targets)
             self._reset_idle_timer()
 
         group.finished.connect(after_exit)
@@ -1616,6 +1666,9 @@ class LemonDoWidget(QWidget):
 
     def enterEvent(self, event) -> None:
         if self.is_hibernated:
+            if self._hibernate_anim_group and self._hibernate_anim_group.state() == QAbstractAnimation.State.Running:
+                super().enterEvent(event)
+                return
             self._hibernate_hovered = True
             rect = self._hibernate_target_geometry()
             scale = 1.05
@@ -1633,6 +1686,9 @@ class LemonDoWidget(QWidget):
 
     def leaveEvent(self, event) -> None:
         if self.is_hibernated and self._hibernate_hovered:
+            if self._hibernate_anim_group and self._hibernate_anim_group.state() == QAbstractAnimation.State.Running:
+                super().leaveEvent(event)
+                return
             self._hibernate_hovered = False
             self.setGeometry(self._hibernate_target_geometry())
             self.setWindowOpacity(0.2)
