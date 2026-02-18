@@ -1,5 +1,168 @@
 # Lemon Do — Product Requirements Document
 
+> **Status:** Implemented (active polish)
+> **Last updated:** 2026-02-18
+
+---
+
+## 1. Overview
+
+**Product name:** Lemon Do  
+**One-liner:** A compact desktop productivity widget with living color transitions and tactile task stacking.
+
+### Vision
+
+Lemon Do is a tiny, always-visible task surface designed for low-friction daily execution.  
+It emphasizes visual rhythm (time-based palette shifts), direct inline editing, and a satisfying “file-away” completion stack.
+
+### Target Users
+
+| Persona | Description |
+|---------|-------------|
+| Focused solo worker | Wants minimal overhead and quick keyboard/mouse interactions. |
+| Student or maker | Needs a persistent, lightweight prompt for a few key tasks. |
+| Visual flow user | Prefers ambient color cues and motion feedback over heavy controls. |
+
+---
+
+## 2. Goals & Success Metrics
+
+| Goal | Metric | Target |
+|------|--------|--------|
+| Keep workflow friction low | Steps to add/edit/complete a task | Inline edit + one-click complete |
+| Preserve visual delight | Completion interaction quality | Fireworks + staged stack animation |
+| Communicate daily phase | Color behavior | Minute-based interpolation + threshold fades |
+| Enforce shutdown boundary | Night lockout behavior | Hard stop 22:00–04:00 |
+
+---
+
+## 3. Functional Requirements
+
+### 3.1 Core Features
+
+| ID | Feature | Priority | Status |
+|----|---------|----------|--------|
+| F-001 | Frameless, always-on-top translucent widget | P0 | Implemented |
+| F-002 | Pill-shaped clip-mask shell | P0 | Implemented |
+| F-003 | Inline editable task stripes | P0 | Implemented |
+| F-004 | Time keyframe color engine | P0 | Implemented |
+| F-005 | 1-second threshold transition animation | P0 | Implemented |
+| F-006 | Sleep lockout (22:00–04:00) | P0 | Implemented |
+| F-007 | Stacking completion system | P0 | Implemented |
+| F-008 | Dynamic “+” task creation button | P1 | Implemented |
+| F-009 | Keyboard task traversal (Tab / Shift+Tab) | P1 | Implemented |
+| F-010 | Debug time controls + overlay toggle | P2 | Implemented |
+| F-011 | Custom fonts (Lexend + Quicksand) | P1 | Implemented |
+
+### 3.2 Feature Details
+
+#### F-001: Window Shell
+
+- Frameless window with translucent background and always-on-top behavior.
+- Dragging supported via mouse press/move/release events.
+
+#### F-002: Pill Geometry + Clipping
+
+- Pill outline is defined with `QPainterPath`.
+- Resize mask is applied from the pill polygon to prevent overhang.
+- Paint pass also clips by pill path before drawing.
+
+#### F-003: Task Stripe Interaction
+
+- Task stripes are full-width and inline-editable (`QTextEdit`).
+- Empty stripes use italic text, active stripes use regular text.
+- Completed stripes become read-only and visually greyed.
+- Right-click resets a stripe to empty (dev helper).
+
+#### F-004: Task Completion Flow
+
+- Completion trigger via hover check-mark button (`✓`).
+- Completion animation sequence:
+  1. grey-out fade + fireworks,
+  2. completed stripe slides to pile,
+  3. remaining stripes and `+` settle to new spacing.
+
+#### F-005: Dynamic Task Addition
+
+- Small `+` button creates a new stripe.
+- `+` visibility toggled by `A` key.
+- New stripe enters from the right with staged slide timing.
+
+#### F-006: Keyboard Navigation
+
+- `Tab` moves focus to next active stripe.
+- `Shift+Tab` moves focus to previous active stripe.
+
+#### F-007: Time-Based Color Engine
+
+- Current minute drives interpolation between keyframes:
+  - 04:00 → 15:59: yellow/orange background progression
+  - 16:00 → 21:59: flipped blue/purple background + warm stripes
+  - 22:00 → 04:00: black lockout mode
+- Palette threshold changes animate with `QVariantAnimation` over 1 second.
+
+#### F-008: Sleep Mode
+
+- Background fades to black and text to white.
+- Task stripes hidden; “Go to bed, come back tomorrow.” label shown.
+
+---
+
+## 4. Non-Functional Requirements
+
+| Category | Requirement |
+|----------|-------------|
+| Platform | Python + PyQt6 desktop app |
+| Min window size | At least `300 x 820` |
+| Responsiveness | Dragging, typing, and hover interactions feel immediate |
+| Rendering safety | Clip mask must prevent stripe overhang outside pill |
+| Stability | Completion/add animations should not clip or hide tasks unexpectedly |
+
+---
+
+## 5. Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| UI | PyQt6 |
+| Language | Python 3.x |
+| Entry point | `lemon_do.pyw` |
+| Typography | Lexend (tasks), Quicksand Bold (title) |
+| Rendering | `QPainter`, `QPainterPath`, `QRegion`, dynamic widget styles |
+| Animation | `QPropertyAnimation`, `QVariantAnimation`, easing curves |
+
+---
+
+## 6. Milestones
+
+| Milestone | Status | Deliverables |
+|-----------|--------|--------------|
+| M1 — Core widget shell | Done | Frameless pill, dragging, top-level structure |
+| M2 — Living color engine | Done | Keyframe interpolation + threshold fades |
+| M3 — Interaction polish | Done | Inline edit, hover complete, fireworks |
+| M4 — Stack behavior | Done | Completed pile + staged relayout |
+| M5 — Dynamic tasks | Done | `+` button task creation + keyboard toggle/focus travel |
+| M6 — Stability hardening | In progress | Ongoing animation glitch/crash fixes |
+
+---
+
+## 7. Open Questions
+
+- [ ] Persist tasks across app restarts?
+- [ ] Persist widget location between launches?
+- [ ] Expose stack spacing/animation timing as user settings?
+- [ ] Keep dev reset behavior in production build?
+
+---
+
+## Changelog
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-02-18 | AI | Converted template PRD into concrete product doc. |
+| 2026-02-18 | AI | Updated PRD to match stack engine, `+` flow, keyboard traversal, and active animation/stability work. |
+# Lemon Do — Product Requirements Document
+
 > **Status:** Implemented
 > **Last updated:** 2026-02-18
 

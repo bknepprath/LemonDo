@@ -5,18 +5,25 @@
 
 ---
 
-## How to Use This Log
-
-Each bug gets an entry when discovered. Update the entry as you investigate and fix.
-
-**Severity levels:** `critical` | `high` | `medium` | `low` | `cosmetic`
-**Statuses:** `open` | `investigating` | `fix-in-progress` | `resolved` | `won't-fix`
-
----
-
 ## Active Bugs
 
-_No active bugs._
+### BUG-004: Completion animation clipping / disappearing stripes
+
+- **Severity:** high
+- **Status:** investigating
+- **Found:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`_animate_completion_sequence`, `relayout_stripes`)
+- **Symptoms:** During completion flow, lower stripes can appear truncated/disappear, then reappear.
+- **Current hypothesis:** Wrapper height and animation target geometry can temporarily diverge during multi-stage transitions.
+
+### BUG-005: Add task animation instability
+
+- **Severity:** high
+- **Status:** investigating
+- **Found:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`_animate_add_task_sequence`)
+- **Symptoms:** Add-task flow can still crash or become unstable depending on timing/order of animations.
+- **Current hypothesis:** Parallel animation lifecycle and geometry synchronization around add sequence still need hardening.
 
 ---
 
@@ -28,10 +35,9 @@ _No active bugs._
 - **Status:** resolved
 - **Found:** 2026-02-18
 - **Resolved:** 2026-02-18
-- **File(s):** `lemon_do.pyw` (`resizeEvent`, `paintEvent`)
-- **Symptoms:** App crashes immediately on launch with `TypeError: addRoundedRect(...): argument 1 has unexpected type 'QRect'`.
-- **Root cause:** PyQt6's `QPainterPath.addRoundedRect` requires `QRectF`, but `self.rect()` returns `QRect`.
-- **Fix:** Wrapped all `self.rect()` calls in `QRectF()` before passing to `addRoundedRect`. Added `QRectF` import from `PyQt6.QtCore`.
+- **File(s):** `lemon_do.pyw`
+- **Root cause:** `addRoundedRect` received `QRect` instead of `QRectF`.
+- **Fix:** Converted rectangles to `QRectF` for painter path calls.
 
 ### BUG-002: Tiny circle in sleep mode
 
@@ -39,21 +45,19 @@ _No active bugs._
 - **Status:** resolved
 - **Found:** 2026-02-18
 - **Resolved:** 2026-02-18
-- **File(s):** `lemon_do.pyw` (`__init__`, `on_stripe_height_changed`)
-- **Symptoms:** During night/sleep mode the window collapsed to a small circle because all content was hidden and no minimum size was enforced.
-- **Root cause:** `setFixedSize` was used instead of `setMinimumSize`, and layout constraint allowed the widget to shrink freely when stripes were hidden.
-- **Fix:** Changed to `setMinimumSize(300, 820)` and added a floor check in `on_stripe_height_changed` to prevent shrinking below the minimum.
+- **File(s):** `lemon_do.pyw`
+- **Root cause:** Window lacked a robust minimum size floor in hidden-content states.
+- **Fix:** Enforced minimum dimensions and resize floor handling.
 
-### BUG-003: Git commit accidentally deleted `lemon_do.py`
+### BUG-003: Tracked file mismatch during `.py` -> `.pyw` transition
 
 - **Severity:** medium
 - **Status:** resolved
 - **Found:** 2026-02-18
 - **Resolved:** 2026-02-18
 - **File(s):** Repository
-- **Symptoms:** Commit `0f988f0` showed `lemon_do.py` as deleted; the file had been renamed to `lemon_do.pyw` outside of git tracking.
-- **Root cause:** The file was renamed to `.pyw` (to suppress the console window on Windows) but the old `.py` was still tracked by git. The commit staged the deletion of the old file without adding the new one.
-- **Fix:** Added `lemon_do.pyw` as a new tracked file in the subsequent commit `63e2db9`.
+- **Root cause:** Old tracked file removed while new entry file was initially untracked.
+- **Fix:** Added and pushed `lemon_do.pyw` as canonical app entry point.
 
 ---
 
@@ -61,4 +65,4 @@ _No active bugs._
 
 | Total | Open | Resolved | Won't Fix |
 |-------|------|----------|-----------|
-| 3 | 0 | 3 | 0 |
+| 5 | 2 | 3 | 0 |
