@@ -163,10 +163,60 @@ No active bugs at this time.
 - **Root cause:** Focus mode repeatedly swapped graphics effects on task widgets and mixed with completion/un-completion transitions, causing stale/invalid effect state and intermittent crashes.
 - **Fix:** Reworked focus mode visuals to avoid blur/effect swapping on task stripes entirely. New mode uses pure-black global overlay + centered text label on focused task; non-focused tasks simply dim via paint overlay. Also separated long-press from click-to-edit flow to prevent accidental editor activation during focus entry.
 
+### BUG-016: Task text erased by right-click
+
+- **Severity:** high
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`TaskStripe.mousePressEvent`)
+- **Root cause:** Legacy dev helper mapped right-click to `reset_slot()`, clearing user text.
+- **Fix:** Removed right-click reset path on task stripes.
+
+### BUG-017: Hibernate exit flash in focus/overlay contexts
+
+- **Severity:** high
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`exit_hibernate`, overlay restore)
+- **Root cause:** UI briefly restored base widgets before focus/overlay context was fully re-established.
+- **Fix:** Added immediate wake overlay + context-aware restoration order so cover stays solid until target mode is stable.
+
+### BUG-018: Clock overlay font ignored configured size
+
+- **Severity:** medium
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`_update_overlay_theme`, clock overlay)
+- **Root cause:** Overlay body stylesheet hardcoded `font-size`, overriding runtime `QFont`.
+- **Fix:** Removed body font-size from stylesheet; clock now respects explicit `QFont` size.
+
+### BUG-019: Day swipe navigation could hide tasks after transition
+
+- **Severity:** high
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`_animate_day_navigation`, `_interrupt_and_snap_animations`)
+- **Root cause:** Temporary opacity effects/animation cleanup on `stripe_wrapper` could persist across interrupted transitions.
+- **Fix:** Added explicit graphics-effect cleanup before/after swipe and on animation interrupt/snap.
+
+### BUG-020: Left/right hotkeys did not expose past-day nav/date controls
+
+- **Severity:** medium
+- **Status:** resolved
+- **Found:** 2026-02-18
+- **Resolved:** 2026-02-18
+- **File(s):** `lemon_do.pyw` (`eventFilter`, `_update_nav_buttons`)
+- **Root cause:** Keyboard navigation path did not reliably surface nav context the same way as button-driven flow.
+- **Fix:** Intercepted left/right globally in `eventFilter` and auto-shows nav/date while `view_date < today`, independent of `P` toggle.
+
 ---
 
 ## Stats
 
 | Total | Open | Resolved | Won't Fix |
 |-------|------|----------|-----------|
-| 15 | 0 | 15 | 0 |
+| 20 | 0 | 20 | 0 |

@@ -65,6 +65,8 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 | F-019 | Confetti particle overlay (top-layer) | P1 | Implemented |
 | F-020 | Tab creates task when none exist or cursor at bottom | P1 | Implemented |
 | F-021 | Focus mode via long-press (task centering + backdrop effects) | P2 | Implemented |
+| F-022 | Overlay views: Hotkeys (`Space`), Clock (`C`), Stats (`S`) | P2 | Implemented |
+| F-023 | Lifetime stats persistence + day-swipe navigation animation | P2 | Implemented |
 
 ### 3.2 Feature Details
 
@@ -85,7 +87,7 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 - Empty stripes use italic text, active stripes use regular text.
 - Completed stripes become read-only with solid hard-gray background + drop shadow.
 - Hover shows check-mark (`✓`) and trash (`✕`) buttons.
-- Right-click resets a stripe to empty (dev helper).
+- Right-click no longer resets stripe text.
 
 #### F-007: Dual-Zone Layout
 
@@ -99,7 +101,8 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 - Auto-saves on task change, completion, deletion, and close.
 - New-day detection triggers save + fresh slate.
 - Back/forward navigation buttons (toggled via `P`) with spam-safe animation interruption.
-- Date label shows viewed date when browsing past days.
+- Date label and nav controls auto-show when browsing past days (including left/right hotkeys).
+- Left/right hotkey day navigation uses swipe animation between days.
 
 #### F-014: Accordion Interaction
 
@@ -127,6 +130,19 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 - **Text presentation:** Focused task text is centered both horizontally and vertically.
 - **Editing behavior:** No cursor and no inline editing while in focus mode.
 - **Exit:** Single click anywhere exits focus mode and restores normal layout.
+
+#### F-022: Overlay Views
+
+- `Space` toggles a centered hotkey menu overlay.
+- `C` toggles a minimalist clock overlay (12-hour display, no AM/PM marker).
+- `S` toggles stats overlay.
+- Overlay transitions use the same fade timing/easing profile as existing UI fades.
+
+#### F-023: Lifetime Metrics
+
+- Stats are persisted in SQLite (`app_stats` table).
+- Tracks lifetime clicks, tasks created, tasks completed, tasks deleted.
+- Tracks "most tasks completed in one day".
 
 #### F-018: Nuke Reset
 
@@ -208,3 +224,4 @@ It emphasizes visual rhythm (time-based palette shifts), direct inline editing, 
 | 2026-02-18 | AI | Full rewrite: persistence, history nav, dual-zone layout, accordion, deletion, hibernate, Tab hotkey, top-layer fireworks. |
 | 2026-02-18 | AI | Added focus mode spec and updated hibernate geometry/hover animation behavior. |
 | 2026-02-18 | AI | Focus mode redesign: pure black backdrop, centered task text, no cursor/editing in focus state, long-press/click separation hardening. |
+| 2026-02-18 | AI | Added overlay views (hotkeys/clock/stats), lifetime stats persistence, day swipe navigation animation, and auto-visible past-day nav/date controls. |

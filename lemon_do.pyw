@@ -2,6 +2,7 @@ import math
 import random
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ from PyQt6.QtGui import (
     QCursor,
     QFont,
     QFontDatabase,
+    QFontMetrics,
     QKeySequence,
     QPainter,
     QPainterPath,
@@ -761,6 +763,19 @@ class LemonDoWidget(QWidget):
         self._hibernate_from_focus = False
         self._hibernate_focus_target: TaskStripe | None = None
         self._wake_overlay_anim: QPropertyAnimation | None = None
+        self._overlay_mode: str | None = None
+        self._overlay_anim: QPropertyAnimation | None = None
+        self._focus_started_at: float | None = None
+        self.stat_clicks = 0
+        self.stat_tasks_created = 0
+        self.stat_tasks_deleted = 0
+        self.stat_tasks_completed = 0
+        self.stat_focus_seconds = 0.0
+        self._last_click_count_time = 0.0
+        self._last_click_count_pos = QPoint(-10000, -10000)
+        self._day_nav_anim_group: QParallelAnimationGroup | None = None
+        self._hibernate_overlay_mode: str | None = None
+        self._lifetime_stats_dirty = False
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -774,6 +789,7 @@ class LemonDoWidget(QWidget):
         self._position_debug_overlay()
         self._setup_shortcuts()
         self._setup_timers()
+        self._load_lifetime_stats()
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -870,6 +886,23 @@ class LemonDoWidget(QWidget):
         self.wake_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.wake_overlay.setGeometry(self.rect())
         self.wake_overlay.hide()
+        self.info_overlay = QWidget(self)
+        self.info_overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.info_overlay.setGeometry(self.rect())
+        self.info_overlay.hide()
+        self.info_overlay_layout = QVBoxLayout(self.info_overlay)
+        self.info_overlay_layout.setContentsMargins(28, 28, 28, 28)
+        self.info_overlay_layout.setSpacing(14)
+        self.info_overlay_layout.addStretch(1)
+        self.info_overlay_title = QLabel(self.info_overlay)
+        self.info_overlay_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.info_overlay_layout.addWidget(self.info_overlay_title)
+        self.info_overlay_body = QLabel(self.info_overlay)
+        self.info_overlay_body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.info_overlay_body.setWordWrap(True)
+        self.info_overlay_layout.addWidget(self.info_overlay_body)
+        self.info_overlay_layout.addStretch(1)
+        self._update_overlay_theme()
 
         self._update_nav_buttons()
 
@@ -888,26 +921,21 @@ class LemonDoWidget(QWidget):
         self.idle_timer.setSingleShot(True)
         self.idle_timer.setInterval(600_000)
         self.idle_timer.timeout.connect(self.enter_hibernate)
+        self.overlay_timer = QTimer(self)
+        self.overlay_timer.setInterval(1000)
+        self.overlay_timer.timeout.connect(self._refresh_overlay_content)
+        self.overlay_timer.start()
 
     def _setup_shortcuts(self) -> None:
-        self.toggle_add_shortcut = QShortcut(QKeySequence("A"), self)
-        self.toggle_add_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.toggle_add_shortcut.activated.connect(self.toggle_add_button_visibility)
-        self.toggle_history_shortcut = QShortcut(QKeySequence("P"), self)
-        self.toggle_history_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self.toggle_history_shortcut.activated.connect(self.toggle_history_controls)
         self.nuke_shortcut = QShortcut(QKeySequence("N"), self)
         self.nuke_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.nuke_shortcut.activated.connect(self.nuke_all_task_data)
 
     def toggle_history_controls(self) -> None:
-        if self._focus_mode_active:
-            return
-        self.nav_controls_visible = not self.nav_controls_visible
-        self._position_title()
-        self._update_nav_buttons()
+        return
 
     def closeEvent(self, event) -> None:
+        self._save_lifetime_stats()
         self._save_current_day()
         app = QApplication.instance()
         if app is not None:
@@ -932,7 +960,69 @@ class LemonDoWidget(QWidget):
             """
         )
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_day_status ON tasks(day, status)")
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_stats (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         self.db.commit()
+
+    def _load_lifetime_stats(self) -> None:
+        keys = [
+            "lifetime_clicks",
+            "lifetime_tasks_created",
+            "lifetime_tasks_deleted",
+            "lifetime_tasks_completed",
+        ]
+        values: dict[str, int] = {}
+        for key in keys:
+            row = self.db.execute("SELECT value FROM app_stats WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                values[key] = 0
+            else:
+                values[key] = int(row[0])
+        self.stat_clicks = values["lifetime_clicks"]
+        self.stat_tasks_created = values["lifetime_tasks_created"]
+        self.stat_tasks_deleted = values["lifetime_tasks_deleted"]
+        self.stat_tasks_completed = values["lifetime_tasks_completed"]
+
+    def _save_lifetime_stats(self) -> None:
+        if not self._lifetime_stats_dirty:
+            return
+        rows = [
+            ("lifetime_clicks", int(self.stat_clicks)),
+            ("lifetime_tasks_created", int(self.stat_tasks_created)),
+            ("lifetime_tasks_deleted", int(self.stat_tasks_deleted)),
+            ("lifetime_tasks_completed", int(self.stat_tasks_completed)),
+        ]
+        with self.db:
+            for key, value in rows:
+                self.db.execute(
+                    """
+                    INSERT INTO app_stats(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, value),
+                )
+        self._lifetime_stats_dirty = False
+
+    def _best_completed_day_count(self) -> int:
+        row = self.db.execute(
+            """
+            SELECT MAX(c) FROM (
+                SELECT day, COUNT(*) AS c
+                FROM tasks
+                WHERE status = 'COMPLETED'
+                GROUP BY day
+            )
+            """
+        ).fetchone()
+        db_best = int(row[0]) if row and row[0] is not None else 0
+        current_best = len([b for b in self.buttons if b.state == TaskStripe.COMPLETED and not b.is_deleting])
+        return max(db_best, current_best)
 
     def _collect_day_rows(self) -> list[tuple[int, str, str, int | None]]:
         rows: list[tuple[int, str, str, int | None]] = []
@@ -1077,12 +1167,45 @@ class LemonDoWidget(QWidget):
                 event.accept()
                 return True
             self._reset_idle_timer()
+            if event.key() == Qt.Key.Key_Left:
+                self.navigate_days(-1)
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_Right:
+                self.navigate_days(1)
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_Up:
+                self.time_offset += timedelta(minutes=10)
+                self.update_color_state()
+                event.accept()
+                return True
+            if event.key() == Qt.Key.Key_Down:
+                self.time_offset -= timedelta(minutes=10)
+                self.update_color_state()
+                event.accept()
+                return True
             if event.key() == Qt.Key.Key_Tab:
                 if self._handle_tab_hotkey():
                     event.accept()
                     return True
         elif event.type() == QEvent.Type.MouseButtonPress:
             self._reset_idle_timer()
+            if (
+                isinstance(obj, QWidget)
+                and (obj is self or self.isAncestorOf(obj))
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                now_mono = time.monotonic()
+                click_pos = event.globalPosition().toPoint()
+                if (
+                    now_mono - self._last_click_count_time > 0.08
+                    or (click_pos - self._last_click_count_pos).manhattanLength() > 4
+                ):
+                    self.stat_clicks += 1
+                    self._lifetime_stats_dirty = True
+                    self._last_click_count_time = now_mono
+                    self._last_click_count_pos = click_pos
             self._collapse_accordion_on_non_task_click(event)
         elif event.type() in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress}:
             self._reset_idle_timer()
@@ -1093,15 +1216,79 @@ class LemonDoWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def navigate_days(self, delta: int) -> None:
+        if self.is_hibernated or self._focus_mode_active:
+            return
         target = self.view_date + timedelta(days=delta)
         nav_today = self._navigation_today()
         if target > nav_today:
             target = nav_today
         if target == self.view_date:
             return
+        if self._overlay_mode is not None:
+            self._set_overlay_mode(None, animated=False)
         self._interrupt_and_snap_animations()
         self._save_current_day()
-        self._load_day(target)
+        self._animate_day_navigation(target, delta)
+
+    def _animate_day_navigation(self, target: date, delta: int) -> None:
+        if self._day_nav_anim_group and self._day_nav_anim_group.state() == QAbstractAnimation.State.Running:
+            self._day_nav_anim_group.stop()
+        self.stripe_wrapper.setGraphicsEffect(None)
+        if not self.stripe_wrapper.isVisible():
+            self._load_day(target)
+            return
+        shift = max(42, int(self.width() * 0.18))
+        out_dx = shift if delta < 0 else -shift
+        in_dx = -out_dx
+        start_pos = self.stripe_wrapper.pos()
+        out_pos = QPoint(start_pos.x() + out_dx, start_pos.y())
+        effect = self._ensure_opacity_effect(self.stripe_wrapper)
+        effect.setOpacity(1.0)
+
+        out_move = QPropertyAnimation(self.stripe_wrapper, b"pos", self)
+        out_move.setDuration(150)
+        out_move.setStartValue(start_pos)
+        out_move.setEndValue(out_pos)
+        out_move.setEasingCurve(QEasingCurve.Type.OutCubic)
+        out_fade = QPropertyAnimation(effect, b"opacity", self)
+        out_fade.setDuration(150)
+        out_fade.setStartValue(1.0)
+        out_fade.setEndValue(0.0)
+        out_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        out_group = QParallelAnimationGroup(self)
+        out_group.addAnimation(out_move)
+        out_group.addAnimation(out_fade)
+
+        def animate_in() -> None:
+            self._load_day(target)
+            final_pos = self.stripe_wrapper.pos()
+            self.stripe_wrapper.move(final_pos + QPoint(in_dx, 0))
+            effect_in = self._ensure_opacity_effect(self.stripe_wrapper)
+            effect_in.setOpacity(0.0)
+            in_move = QPropertyAnimation(self.stripe_wrapper, b"pos", self)
+            in_move.setDuration(190)
+            in_move.setStartValue(self.stripe_wrapper.pos())
+            in_move.setEndValue(final_pos)
+            in_move.setEasingCurve(QEasingCurve.Type.OutCubic)
+            in_fade = QPropertyAnimation(effect_in, b"opacity", self)
+            in_fade.setDuration(190)
+            in_fade.setStartValue(0.0)
+            in_fade.setEndValue(1.0)
+            in_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+            in_group = QParallelAnimationGroup(self)
+            in_group.addAnimation(in_move)
+            in_group.addAnimation(in_fade)
+            def cleanup_in() -> None:
+                self.stripe_wrapper.move(final_pos)
+                if self.stripe_wrapper.graphicsEffect() is effect_in:
+                    self.stripe_wrapper.setGraphicsEffect(None)
+            in_group.finished.connect(cleanup_in)
+            self._day_nav_anim_group = in_group
+            in_group.start()
+
+        out_group.finished.connect(animate_in)
+        self._day_nav_anim_group = out_group
+        out_group.start()
 
     def _update_nav_buttons(self) -> None:
         if not hasattr(self, "back_button"):
@@ -1114,9 +1301,9 @@ class LemonDoWidget(QWidget):
         nav_today = self._navigation_today()
         self.back_button.setEnabled(True)
         self.forward_button.setEnabled(self.view_date < nav_today)
-        self.back_button.setVisible(self.nav_controls_visible)
-        self.forward_button.setVisible(self.nav_controls_visible)
-        show_today_label = self.nav_controls_visible and self.view_date < nav_today
+        self.back_button.hide()
+        self.forward_button.hide()
+        show_today_label = self.view_date < nav_today
         self.day_label.setVisible(show_today_label)
         self.day_label.setText(self.view_date.strftime("%b %d"))
 
@@ -1161,6 +1348,8 @@ class LemonDoWidget(QWidget):
             has_running = True
         if self._completion_sequence_group and self._completion_sequence_group.state() == QAbstractAnimation.State.Running:
             has_running = True
+        if self._day_nav_anim_group and self._day_nav_anim_group.state() == QAbstractAnimation.State.Running:
+            has_running = True
         for anim in list(self._running_animations):
             if anim.state() == QAbstractAnimation.State.Running:
                 has_running = True
@@ -1177,6 +1366,8 @@ class LemonDoWidget(QWidget):
             self._window_resize_anim.stop()
         if self._completion_sequence_group and self._completion_sequence_group.state() == QAbstractAnimation.State.Running:
             self._completion_sequence_group.stop()
+        if self._day_nav_anim_group and self._day_nav_anim_group.state() == QAbstractAnimation.State.Running:
+            self._day_nav_anim_group.stop()
         for anim in list(self._running_animations):
             try:
                 anim.stop()
@@ -1220,6 +1411,7 @@ class LemonDoWidget(QWidget):
             self.add_task_button.setEnabled(True)
         self._delete_in_progress = False
         self._completion_in_progress = False
+        self.stripe_wrapper.setGraphicsEffect(None)
         self.main_layout.setEnabled(True)
         self.main_layout.activate()
 
@@ -1258,6 +1450,158 @@ class LemonDoWidget(QWidget):
             anim.finished.connect(clear_effect)
             anim.start()
             self._ui_fade_anims.append(anim)
+
+    def _focus_elapsed_seconds(self) -> float:
+        elapsed = self.stat_focus_seconds
+        if self._focus_mode_active and self._focus_started_at is not None:
+            elapsed += max(0.0, time.monotonic() - self._focus_started_at)
+        return elapsed
+
+    def _update_overlay_theme(self) -> None:
+        if not hasattr(self, "info_overlay"):
+            return
+        bg = QColor(self.background_color)
+        fg = get_contrast_color(bg)
+        self.info_overlay.setStyleSheet(
+            f"background-color: rgb({bg.red()}, {bg.green()}, {bg.blue()});"
+        )
+        self.info_overlay_title.setStyleSheet(
+            f"color: rgb({fg.red()}, {fg.green()}, {fg.blue()}); font-size: 26px; font-weight: 700;"
+        )
+        self.info_overlay_body.setStyleSheet(
+            f"color: rgb({fg.red()}, {fg.green()}, {fg.blue()}); line-height: 1.45;"
+        )
+
+    def _hotkeys_overlay_text(self) -> str:
+        return (
+            "Space - Toggle this hotkey menu\n"
+            "C - Open/close clock view\n"
+            "S - Open/close stats view\n"
+            "H - Toggle debug time label\n"
+            "N - Nuke all task data\n"
+            "Tab - Jump/add task while editing\n"
+            "Left/Right - Navigate history days\n"
+            "Up/Down - Time travel debug\n"
+            "R - Reset spoofed time\n"
+            "Esc - Exit app\n"
+            "Right click window - Hibernate\n"
+            "Long press task - Enter focus mode"
+        )
+
+    def _stats_overlay_text(self) -> str:
+        completed = len([b for b in self.buttons if b.state == TaskStripe.COMPLETED and not b.is_deleting])
+        active_or_done = len([b for b in self.buttons if b.state != TaskStripe.EMPTY and not b.is_deleting])
+        completion_pct = (completed / max(1, active_or_done)) * 100.0 if active_or_done else 0.0
+        best_day = self._best_completed_day_count()
+        focus_seconds = int(self._focus_elapsed_seconds())
+        focus_minutes, focus_rem = divmod(focus_seconds, 60)
+        focus_hours, focus_minutes = divmod(focus_minutes, 60)
+        return (
+            f"Time in focus mode: {focus_hours:02d}:{focus_minutes:02d}:{focus_rem:02d}\n"
+            f"Lifetime clicks: {self.stat_clicks}\n"
+            f"Lifetime tasks created: {self.stat_tasks_created}\n"
+            f"Lifetime tasks deleted: {self.stat_tasks_deleted}\n"
+            f"Lifetime tasks completed: {self.stat_tasks_completed}\n"
+            f"Most tasks completed in one day: {best_day}\n"
+            f"Task Completion: {completed}/{max(1, active_or_done)} ({completion_pct:.0f}%)"
+        )
+
+    def _clock_overlay_text(self) -> str:
+        now = self.get_app_time()
+        hour12 = now.hour % 12 or 12
+        return f"{hour12} {now.minute:02d} {now.second:02d}"
+
+    def _clock_overlay_font(self) -> QFont:
+        preferred_family = self.title_font_family or self.font().family()
+        preferred = QFont(preferred_family, 40)
+        metrics = QFontMetrics(preferred)
+        if all(metrics.inFontUcs4(ord(ch)) for ch in "0123456789"):
+            return preferred
+        return QFont(self.font().family(), 40)
+
+    def _set_overlay_mode(self, mode: str | None, animated: bool = True) -> None:
+        if self.is_hibernated:
+            return
+        if mode == self._overlay_mode:
+            return
+        previous_mode = self._overlay_mode
+        self._overlay_mode = mode
+        self._update_overlay_theme()
+        if mode is None:
+            if self._overlay_anim and self._overlay_anim.state() == QAbstractAnimation.State.Running:
+                self._overlay_anim.stop()
+            if not self.info_overlay.isVisible():
+                return
+            if not animated:
+                self.info_overlay.hide()
+                self.info_overlay.setGraphicsEffect(None)
+                return
+            effect = self._ensure_opacity_effect(self.info_overlay)
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(230)
+            anim.setStartValue(float(effect.opacity()))
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+            def finish_hide() -> None:
+                self.info_overlay.hide()
+                if self.info_overlay.graphicsEffect() is effect:
+                    self.info_overlay.setGraphicsEffect(None)
+
+            anim.finished.connect(finish_hide)
+            self._overlay_anim = anim
+            anim.start()
+            return
+
+        if mode == "hotkeys":
+            self.info_overlay_title.show()
+            self.info_overlay_title.setText("Keyboard Hotkeys")
+            self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
+            self.info_overlay_body.setFont(QFont(self.font().family(), 13))
+            self.info_overlay_body.setText(self._hotkeys_overlay_text())
+        elif mode == "clock":
+            self.info_overlay_title.hide()
+            self.info_overlay_body.setFont(self._clock_overlay_font())
+            self.info_overlay_body.setText(self._clock_overlay_text())
+        elif mode == "stats":
+            self.info_overlay_title.show()
+            self.info_overlay_title.setText("Stats")
+            self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
+            self.info_overlay_body.setFont(QFont(self.font().family(), 13))
+            self.info_overlay_body.setText(self._stats_overlay_text())
+        else:
+            return
+        self.info_overlay.raise_()
+        self.info_overlay.show()
+        if previous_mode is not None:
+            if self._overlay_anim and self._overlay_anim.state() == QAbstractAnimation.State.Running:
+                self._overlay_anim.stop()
+            effect = self._ensure_opacity_effect(self.info_overlay)
+            effect.setOpacity(1.0)
+            return
+        if self._overlay_anim and self._overlay_anim.state() == QAbstractAnimation.State.Running:
+            self._overlay_anim.stop()
+        if animated:
+            effect = self._ensure_opacity_effect(self.info_overlay)
+            effect.setOpacity(0.0)
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(230)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._overlay_anim = anim
+            anim.start()
+        else:
+            self.info_overlay.setGraphicsEffect(None)
+
+    def _toggle_overlay_mode(self, mode: str) -> None:
+        self._set_overlay_mode(None if self._overlay_mode == mode else mode, animated=True)
+
+    def _refresh_overlay_content(self) -> None:
+        if self._overlay_mode == "clock":
+            self.info_overlay_body.setText(self._clock_overlay_text())
+        elif self._overlay_mode == "stats":
+            self.info_overlay_body.setText(self._stats_overlay_text())
 
     def _play_wake_overlay(self, color: QColor) -> None:
         if not hasattr(self, "wake_overlay"):
@@ -1304,6 +1648,7 @@ class LemonDoWidget(QWidget):
     def enter_hibernate(self) -> None:
         if self.is_hibernated:
             return
+        self._hibernate_overlay_mode = self._overlay_mode
         if self._focus_mode_active:
             self._hibernate_from_focus = True
             self._hibernate_focus_target = self._focused_stripe
@@ -1327,6 +1672,9 @@ class LemonDoWidget(QWidget):
                 except RuntimeError:
                     pass
             self.focus_tint_overlay.hide()
+            if self._focus_started_at is not None:
+                self.stat_focus_seconds += max(0.0, time.monotonic() - self._focus_started_at)
+                self._focus_started_at = None
             self._focus_mode_active = False
             self._focused_stripe = None
             self.main_layout.setEnabled(True)
@@ -1346,6 +1694,7 @@ class LemonDoWidget(QWidget):
         self.debug_label.hide()
         self.sleep_label.hide()
         self.title.hide()
+        self._set_overlay_mode(None, animated=False)
         self.back_button.hide()
         self.forward_button.hide()
         self.day_label.hide()
@@ -1402,14 +1751,18 @@ class LemonDoWidget(QWidget):
         def after_exit() -> None:
             if self._pre_hibernate_min_size is not None:
                 self.setMinimumSize(self._pre_hibernate_min_size[0], self._pre_hibernate_min_size[1])
-            self.title.show()
+            restore_overlay_mode = self._hibernate_overlay_mode
+            if restore_overlay_mode is None:
+                self.title.show()
+            else:
+                self.title.hide()
             self.stripe_wrapper.show()
             self.apply_dynamic_styles()
             self.recenter_ui(animated=False)
             self._position_title()
             self._update_nav_buttons()
             self._position_debug_overlay()
-            if self.debug_visible:
+            if self.debug_visible and restore_overlay_mode is None:
                 self.debug_label.show()
             if self._hibernate_from_focus and self._hibernate_focus_target in self.buttons:
                 self._enter_focus_mode_immediate(self._hibernate_focus_target)
@@ -1425,9 +1778,12 @@ class LemonDoWidget(QWidget):
                 ]
                 self._fade_in_widgets(fade_targets)
                 self._play_wake_overlay(QColor(self.background_color))
+                if restore_overlay_mode is not None:
+                    self._set_overlay_mode(restore_overlay_mode, animated=False)
             self._reset_idle_timer()
             self._hibernate_focus_target = None
             self._hibernate_from_focus = False
+            self._hibernate_overlay_mode = None
 
         group.finished.connect(after_exit)
         group.start()
@@ -1450,6 +1806,8 @@ class LemonDoWidget(QWidget):
             self.focus_tint_overlay.setGeometry(self.rect())
         if hasattr(self, "wake_overlay"):
             self.wake_overlay.setGeometry(self.rect())
+        if hasattr(self, "info_overlay"):
+            self.info_overlay.setGeometry(self.rect())
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.setGeometry(self.rect())
             self.particle_overlay.raise_()
@@ -1481,8 +1839,11 @@ class LemonDoWidget(QWidget):
         self.recenter_ui(animated=False)
         self._position_debug_overlay()
 
-    def add_task_stripe(self, animate: bool = True) -> None:
+    def add_task_stripe(self, animate: bool = True, count_stat: bool = True) -> None:
         stripe = self._create_task_stripe()
+        if count_stat:
+            self.stat_tasks_created += 1
+            self._lifetime_stats_dirty = True
         if animate:
             self._animate_add_task_sequence(stripe)
         else:
@@ -1613,13 +1974,15 @@ class LemonDoWidget(QWidget):
                 return
             if stripe in self.buttons:
                 self.buttons.remove(stripe)
+                self.stat_tasks_deleted += 1
+                self._lifetime_stats_dirty = True
             try:
                 stripe.setParent(None)
                 stripe.deleteLater()
             except RuntimeError:
                 pass
             if not self.buttons:
-                self.add_task_stripe(animate=False)
+                self.add_task_stripe(animate=False, count_stat=False)
             if not any(b.state == TaskStripe.COMPLETED for b in self.buttons):
                 self._accordion_open = False
             self.recenter_ui(animated=True, interrupt=False)
@@ -1636,6 +1999,8 @@ class LemonDoWidget(QWidget):
         stripe = self.sender()
         if isinstance(stripe, TaskStripe):
             if stripe.state == TaskStripe.COMPLETED and stripe.completion_rank is None:
+                self.stat_tasks_completed += 1
+                self._lifetime_stats_dirty = True
                 stripe.completion_rank = self._completed_counter
                 self._completed_counter += 1
                 self.complete_task(stripe)
@@ -1713,8 +2078,10 @@ class LemonDoWidget(QWidget):
     def enter_focus_mode(self, stripe: TaskStripe) -> None:
         if self._focus_mode_active:
             return
+        self._set_overlay_mode(None, animated=False)
         self._interrupt_and_snap_animations()
         self._focus_mode_active = True
+        self._focus_started_at = time.monotonic()
         self._focused_stripe = stripe
         self.main_layout.setEnabled(False)
         if self._focus_transition_group and self._focus_transition_group.state() == QAbstractAnimation.State.Running:
@@ -1768,10 +2135,12 @@ class LemonDoWidget(QWidget):
     def _enter_focus_mode_immediate(self, stripe: TaskStripe) -> None:
         if stripe not in self.buttons:
             return
+        self._set_overlay_mode(None, animated=False)
         self._interrupt_and_snap_animations()
         if self._focus_transition_group and self._focus_transition_group.state() == QAbstractAnimation.State.Running:
             self._focus_transition_group.stop()
         self._focus_mode_active = True
+        self._focus_started_at = time.monotonic()
         self._focused_stripe = stripe
         self.main_layout.setEnabled(False)
         self._focus_transition_group = None
@@ -1849,6 +2218,9 @@ class LemonDoWidget(QWidget):
 
         def done() -> None:
             self.focus_tint_overlay.hide()
+            if self._focus_started_at is not None:
+                self.stat_focus_seconds += max(0.0, time.monotonic() - self._focus_started_at)
+                self._focus_started_at = None
             self._focus_mode_active = False
             self._focused_stripe = None
             self.main_layout.setEnabled(True)
@@ -1892,13 +2264,14 @@ class LemonDoWidget(QWidget):
             active_start_y = max(0, completed_bottom + 150)
         else:
             active_start_y = proposed_top
+        placeholder_active_bottom = active_start_y + 72 if (completed and not active) else 0
         current_y = active_start_y
         for idx, stripe in enumerate(active):
             if idx > 0:
                 current_y += active[idx - 1].height() + self.stripe_gap
             targets[stripe] = QRect(0, current_y, wrapper_width, stripe.height())
 
-        show_add = self.add_button_visible and not self.sleep_mode
+        show_add = False
         add_target: QRect | None = None
         if active and show_add:
             last_active = active[-1]
@@ -1913,6 +2286,7 @@ class LemonDoWidget(QWidget):
             add_target = QRect(add_x, add_y, self.add_task_button.width(), self.add_task_button.height())
         wrapper_height = max(
             completed_bottom + 4 if completed else 4,
+            placeholder_active_bottom + 4 if placeholder_active_bottom else 4,
             current_y + active[-1].height() + 4 if active else 4,
             add_y + self.add_task_button.height() + 4 if show_add else 4,
         )
@@ -2312,14 +2686,30 @@ class LemonDoWidget(QWidget):
             event.accept()
             return
         key = event.key()
+        if key == Qt.Key.Key_Space:
+            self._toggle_overlay_mode("hotkeys")
+            event.accept()
+            return
+        if key == Qt.Key.Key_C:
+            self._toggle_overlay_mode("clock")
+            event.accept()
+            return
+        if key == Qt.Key.Key_S:
+            self._toggle_overlay_mode("stats")
+            event.accept()
+            return
         if key == Qt.Key.Key_Tab:
             if self._handle_tab_hotkey():
                 event.accept()
                 return
         if key == Qt.Key.Key_Right:
-            self.time_offset += timedelta(hours=1)
+            self.navigate_days(1)
+            event.accept()
+            return
         elif key == Qt.Key.Key_Left:
-            self.time_offset -= timedelta(hours=1)
+            self.navigate_days(-1)
+            event.accept()
+            return
         elif key == Qt.Key.Key_Up:
             self.time_offset += timedelta(minutes=10)
         elif key == Qt.Key.Key_Down:
@@ -2329,14 +2719,6 @@ class LemonDoWidget(QWidget):
         elif key == Qt.Key.Key_H:
             self.debug_visible = not self.debug_visible
             self.debug_label.setVisible(self.debug_visible)
-            event.accept()
-            return
-        elif key == Qt.Key.Key_A:
-            self.toggle_add_button_visibility()
-            event.accept()
-            return
-        elif key == Qt.Key.Key_P:
-            self.toggle_history_controls()
             event.accept()
             return
         elif key == Qt.Key.Key_N:
@@ -2354,10 +2736,7 @@ class LemonDoWidget(QWidget):
         event.accept()
 
     def toggle_add_button_visibility(self) -> None:
-        if self._focus_mode_active:
-            return
-        self.add_button_visible = not self.add_button_visible
-        self.recenter_ui(animated=True)
+        return
 
     def nuke_all_task_data(self) -> None:
         if self._focus_mode_active:
@@ -2482,6 +2861,7 @@ class LemonDoWidget(QWidget):
         anim.start()
 
     def apply_dynamic_styles(self, in_transition: bool = False) -> None:
+        self._update_overlay_theme()
         if self.is_hibernated:
             self.stripe_wrapper.hide()
             self.add_task_button.hide()
@@ -2506,7 +2886,7 @@ class LemonDoWidget(QWidget):
         if in_transition:
             # Keep lockout label hidden during fades; show only in settled sleep mode.
             self.stripe_wrapper.show()
-            self.add_task_button.setVisible(self.add_button_visible)
+            self.add_task_button.hide()
             self.sleep_label.hide()
         elif self.sleep_mode:
             self.stripe_wrapper.hide()
@@ -2514,7 +2894,7 @@ class LemonDoWidget(QWidget):
             self.sleep_label.show()
         else:
             self.stripe_wrapper.show()
-            self.add_task_button.setVisible(self.add_button_visible)
+            self.add_task_button.hide()
             self.sleep_label.hide()
 
         for btn in self.buttons:
@@ -2562,6 +2942,8 @@ class LemonDoWidget(QWidget):
         self.add_task_button.raise_()
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.raise_()
+        if self._overlay_mode is not None and hasattr(self, "info_overlay"):
+            self.info_overlay.raise_()
 
     def spawn_confetti(self, global_pos: QPoint) -> None:
         if self.sleep_mode:

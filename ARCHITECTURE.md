@@ -49,12 +49,19 @@ Lemon Do/
    - Date label (visible when viewing past days)
    - Debug time label (bottom, toggle via `H`)
 
-4. **Particle overlay (`ParticleOverlay`)**
+4. **Overlay views layer**
+   - Full-window color cover for Hotkeys / Clock / Stats modes
+   - Hotkeys: `Space` toggle
+   - Clock: `C` toggle, large numeric display
+   - Stats: `S` toggle, lifetime counters
+   - Uses fade animations consistent with existing UI transitions
+
+5. **Particle overlay (`ParticleOverlay`)**
    - Top-most transparent widget
    - Renders confetti particles above all stripe/button content
    - Clipped by pill path
 
-5. **Focus layer**
+6. **Focus layer**
    - Long-press task interaction enters focus mode
    - Applies full black backdrop overlay behind focused task
    - Focused task switches to centered text label (read-only display)
@@ -73,10 +80,12 @@ Lemon Do/
 
 - SQLite database (`lemon_do_history.db`) with WAL journaling
 - Schema: `tasks(day TEXT, task_id INT, status TEXT, text TEXT, completion_rank INT)`
+- Schema: `app_stats(key TEXT PRIMARY KEY, value INT)` for lifetime metrics
 - Primary key: `(day, task_id)`
 - Index: `(day, status)` for fast retrieval
 - Auto-save on: task state change, completion, deletion, day navigation, app close
 - New-day detection: saves current day, clears new day's slate, reloads
+- Lifetime counters (clicks/created/deleted/completed) are persisted and reloaded on startup
 
 ---
 
@@ -136,6 +145,7 @@ Lemon Do/
 - Entry: shrink + fade to slim 38×30 pill at screen edge (280ms `OutCubic`)
 - Exit: pop back to saved geometry (240ms `OutBack`)
 - Hover: 5% scale-up + opacity bump (100ms animated)
+- If hibernate starts from an overlay/focus context, exit restores that context before wake fade to avoid UI flash-through
 
 ### Focus Mode
 
@@ -145,6 +155,12 @@ Lemon Do/
 - Focused task displays centered text via internal label layer
 - Editor is hidden/read-only during focus mode to suppress cursor flashing
 - Exit: single click anywhere restores baseline UI state and layout
+
+### Day Navigation Swipe
+
+- Left/right day navigation runs horizontal swipe transitions
+- Outgoing day slides/fades out; incoming day slides/fades in from opposite side
+- Animation cleanup clears temporary graphics effects to avoid missing-task regressions
 
 ---
 
@@ -168,6 +184,8 @@ Lemon Do/
 | `_focused_stripe` | `LemonDoWidget` | Task currently centered in focus mode |
 | `view_date` / `today_date` | `LemonDoWidget` | History navigation state |
 | `db` | `LemonDoWidget` | SQLite connection for task persistence |
+| `stat_clicks` / `stat_tasks_created` / `stat_tasks_deleted` / `stat_tasks_completed` | `LemonDoWidget` | Lifetime counters shown in stats overlay |
+| `_overlay_mode` | `LemonDoWidget` | Current special overlay mode (`hotkeys`, `clock`, `stats`, or `None`) |
 
 ---
 
@@ -179,7 +197,7 @@ Lemon Do/
 | Hover active stripe | Show `✓` and `✕` buttons |
 | Click `✓` | Completion sequence + confetti |
 | Click `✕` | Meltdown deletion sequence |
-| Right-click stripe | Reset stripe to empty |
+| Right-click stripe | No reset action (text-safe) |
 | Click completed pile | Accordion open |
 | Click completed task (accordion open) | Un-check → move to active list |
 | Press `Tab` | Create task (if none/at bottom) or focus next |
@@ -187,7 +205,8 @@ Lemon Do/
 | Press `A` | Toggle `+` button visibility |
 | Press `P` | Toggle history navigation controls |
 | Press `N` | Nuke all task data |
-| Press arrows / `R` | Time-travel debug |
+| Press Left/Right | Navigate days (swipe animation) |
+| Press Up/Down / `R` | Time-travel debug |
 | Press `H` | Toggle debug time label |
 | Press `Esc` | Close app |
 | Right-click window background | Enter hibernate mode |
