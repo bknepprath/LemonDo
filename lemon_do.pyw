@@ -210,6 +210,7 @@ class TaskStripe(QWidget):
     completed_clicked = pyqtSignal(object)
     delete_requested = pyqtSignal(object)
     long_pressed = pyqtSignal(object)
+    focus_complete_requested = pyqtSignal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -250,6 +251,7 @@ class TaskStripe(QWidget):
         self.focus_label = QLabel(self)
         self.focus_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.focus_label.setWordWrap(True)
+        self.focus_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.focus_label.setVisible(False)
         self.focus_blackout_cover = QWidget(self)
         self.focus_blackout_cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -285,8 +287,8 @@ class TaskStripe(QWidget):
         self._adjust_height_to_content()
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.RightButton:
-            self.reset_slot()
+        if self._focus_mode and event.button() == Qt.MouseButton.LeftButton and self.state == self.ACTIVE:
+            self.focus_complete_requested.emit(self)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -457,6 +459,10 @@ class TaskStripe(QWidget):
             self.check_button.setVisible(False)
             self.trash_button.setVisible(False)
             return
+        if self._focus_mode:
+            self.check_button.setVisible(False)
+            self.trash_button.setVisible(False)
+            return
         show_check = self._is_hovered and self.state == self.ACTIVE
         show_delete = self._is_hovered
         self.check_button.setVisible(show_check)
@@ -492,7 +498,8 @@ class TaskStripe(QWidget):
     def set_focus_mode(self, enabled: bool) -> None:
         self._focus_mode = enabled
         if enabled:
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.set_focus_blackout(0.0)
             self.editor.clearFocus()
             self.editor.setReadOnly(True)
@@ -502,6 +509,7 @@ class TaskStripe(QWidget):
             self.focus_label.setText(self.editor.toPlainText())
             self.focus_label.show()
         else:
+            self.setCursor(Qt.CursorShape.IBeamCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.focus_label.hide()
             self.editor.show()
@@ -751,6 +759,8 @@ class LemonDoWidget(QWidget):
         self._focus_reparented = False
         self._delete_in_progress = False
         self._hibernate_from_focus = False
+        self._hibernate_focus_target: TaskStripe | None = None
+        self._wake_overlay_anim: QPropertyAnimation | None = None
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -855,6 +865,11 @@ class LemonDoWidget(QWidget):
         self.focus_tint_overlay.setGeometry(self.rect())
         self.focus_tint_overlay.long_pressed.connect(self.exit_focus_mode)
         self.focus_tint_overlay.hide()
+        self.wake_overlay = QWidget(self)
+        self.wake_overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.wake_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.wake_overlay.setGeometry(self.rect())
+        self.wake_overlay.hide()
 
         self._update_nav_buttons()
 
@@ -886,6 +901,8 @@ class LemonDoWidget(QWidget):
         self.nuke_shortcut.activated.connect(self.nuke_all_task_data)
 
     def toggle_history_controls(self) -> None:
+        if self._focus_mode_active:
+            return
         self.nav_controls_visible = not self.nav_controls_visible
         self._position_title()
         self._update_nav_buttons()
@@ -1033,13 +1050,40 @@ class LemonDoWidget(QWidget):
         available[0].focus_for_input()
         return True
 
+    def _stripe_from_widget(self, widget: QWidget | None) -> TaskStripe | None:
+        current = widget
+        while current is not None:
+            if isinstance(current, TaskStripe):
+                return current
+            current = current.parentWidget()
+        return None
+
+    def _collapse_accordion_on_non_task_click(self, event) -> None:
+        if not self._accordion_open or self._focus_mode_active or self.is_hibernated:
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        global_pos = event.globalPosition().toPoint()
+        target_widget = QApplication.widgetAt(global_pos)
+        stripe = self._stripe_from_widget(target_widget)
+        if stripe is None:
+            self._set_accordion_open(False, animated=True)
+
     def eventFilter(self, obj, event) -> bool:
         if event.type() == QEvent.Type.KeyPress:
+            if self._focus_mode_active:
+                if event.key() == Qt.Key.Key_Escape:
+                    self.close()
+                event.accept()
+                return True
             self._reset_idle_timer()
             if event.key() == Qt.Key.Key_Tab:
                 if self._handle_tab_hotkey():
                     event.accept()
                     return True
+        elif event.type() == QEvent.Type.MouseButtonPress:
+            self._reset_idle_timer()
+            self._collapse_accordion_on_non_task_click(event)
         elif event.type() in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress}:
             self._reset_idle_timer()
             if self.is_hibernated and self._hibernate_hovered:
@@ -1215,11 +1259,54 @@ class LemonDoWidget(QWidget):
             anim.start()
             self._ui_fade_anims.append(anim)
 
+    def _play_wake_overlay(self, color: QColor) -> None:
+        if not hasattr(self, "wake_overlay"):
+            return
+        if self._wake_overlay_anim and self._wake_overlay_anim.state() == QAbstractAnimation.State.Running:
+            self._wake_overlay_anim.stop()
+        self.wake_overlay.setGeometry(self.rect())
+        self.wake_overlay.setStyleSheet(
+            f"background-color: rgb({color.red()}, {color.green()}, {color.blue()});"
+        )
+        effect = self._ensure_opacity_effect(self.wake_overlay)
+        effect.setOpacity(1.0)
+        self.wake_overlay.show()
+        self.wake_overlay.raise_()
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(320)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def finish() -> None:
+            self.wake_overlay.hide()
+            if self.wake_overlay.graphicsEffect() is effect:
+                self.wake_overlay.setGraphicsEffect(None)
+
+        anim.finished.connect(finish)
+        self._wake_overlay_anim = anim
+        anim.start()
+
+    def _show_wake_overlay_immediate(self, color: QColor) -> None:
+        if not hasattr(self, "wake_overlay"):
+            return
+        if self._wake_overlay_anim and self._wake_overlay_anim.state() == QAbstractAnimation.State.Running:
+            self._wake_overlay_anim.stop()
+        self.wake_overlay.setGeometry(self.rect())
+        self.wake_overlay.setStyleSheet(
+            f"background-color: rgb({color.red()}, {color.green()}, {color.blue()});"
+        )
+        effect = self._ensure_opacity_effect(self.wake_overlay)
+        effect.setOpacity(1.0)
+        self.wake_overlay.show()
+        self.wake_overlay.raise_()
+
     def enter_hibernate(self) -> None:
         if self.is_hibernated:
             return
         if self._focus_mode_active:
             self._hibernate_from_focus = True
+            self._hibernate_focus_target = self._focused_stripe
             if self._focus_transition_group and self._focus_transition_group.state() == QAbstractAnimation.State.Running:
                 self._focus_transition_group.stop()
             focused = self._focused_stripe
@@ -1245,6 +1332,7 @@ class LemonDoWidget(QWidget):
             self.main_layout.setEnabled(True)
         else:
             self._hibernate_from_focus = False
+            self._hibernate_focus_target = None
         self._interrupt_and_snap_animations()
         self._hibernate_saved_geometry = QRect(self.geometry())
         if self._pre_hibernate_min_size is None:
@@ -1289,6 +1377,8 @@ class LemonDoWidget(QWidget):
             return
         target = QRect(self._hibernate_saved_geometry) if self._hibernate_saved_geometry is not None else QRect(self.geometry())
         self.is_hibernated = False
+        if self._hibernate_from_focus and self._hibernate_focus_target in self.buttons:
+            self._show_wake_overlay_immediate(QColor(0, 0, 0))
         if self._hibernate_anim_group and self._hibernate_anim_group.state() == QAbstractAnimation.State.Running:
             self._hibernate_anim_group.stop()
 
@@ -1321,16 +1411,22 @@ class LemonDoWidget(QWidget):
             self._position_debug_overlay()
             if self.debug_visible:
                 self.debug_label.show()
-            fade_targets = [
-                self.title,
-                self.stripe_wrapper,
-                self.back_button,
-                self.forward_button,
-                self.day_label,
-                self.debug_label,
-            ]
-            self._fade_in_widgets(fade_targets)
+            if self._hibernate_from_focus and self._hibernate_focus_target in self.buttons:
+                self._enter_focus_mode_immediate(self._hibernate_focus_target)
+                self._play_wake_overlay(QColor(0, 0, 0))
+            else:
+                fade_targets = [
+                    self.title,
+                    self.stripe_wrapper,
+                    self.back_button,
+                    self.forward_button,
+                    self.day_label,
+                    self.debug_label,
+                ]
+                self._fade_in_widgets(fade_targets)
+                self._play_wake_overlay(QColor(self.background_color))
             self._reset_idle_timer()
+            self._hibernate_focus_target = None
             self._hibernate_from_focus = False
 
         group.finished.connect(after_exit)
@@ -1352,6 +1448,8 @@ class LemonDoWidget(QWidget):
         self._position_debug_overlay()
         if hasattr(self, "focus_tint_overlay"):
             self.focus_tint_overlay.setGeometry(self.rect())
+        if hasattr(self, "wake_overlay"):
+            self.wake_overlay.setGeometry(self.rect())
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.setGeometry(self.rect())
             self.particle_overlay.raise_()
@@ -1402,6 +1500,7 @@ class LemonDoWidget(QWidget):
         stripe.completed_clicked.connect(self.on_completed_clicked)
         stripe.delete_requested.connect(self.on_delete_requested)
         stripe.long_pressed.connect(self.on_task_long_pressed)
+        stripe.focus_complete_requested.connect(self.on_focus_complete_requested)
         stripe.apply_theme(self.button_color)
         stripe.show()
         self.buttons.append(stripe)
@@ -1556,6 +1655,20 @@ class LemonDoWidget(QWidget):
             return
         self.enter_focus_mode(stripe)
 
+    def on_focus_complete_requested(self, stripe: TaskStripe) -> None:
+        if not self._focus_mode_active:
+            return
+        if stripe is not self._focused_stripe:
+            return
+        if stripe.state != TaskStripe.ACTIVE or stripe.is_deleting:
+            return
+
+        def finish_and_complete() -> None:
+            if stripe in self.buttons and stripe.state == TaskStripe.ACTIVE and not stripe.is_deleting:
+                stripe.set_completed()
+
+        self.exit_focus_mode(on_finished=finish_and_complete)
+
     def _set_focus_tint(self) -> None:
         self.focus_tint_overlay.setStyleSheet("background-color: rgb(0, 0, 0);")
 
@@ -1652,7 +1765,51 @@ class LemonDoWidget(QWidget):
         self._focus_transition_group = transition
         transition.start()
 
-    def exit_focus_mode(self) -> None:
+    def _enter_focus_mode_immediate(self, stripe: TaskStripe) -> None:
+        if stripe not in self.buttons:
+            return
+        self._interrupt_and_snap_animations()
+        if self._focus_transition_group and self._focus_transition_group.state() == QAbstractAnimation.State.Running:
+            self._focus_transition_group.stop()
+        self._focus_mode_active = True
+        self._focused_stripe = stripe
+        self.main_layout.setEnabled(False)
+        self._focus_transition_group = None
+
+        for other in self.buttons:
+            try:
+                if other is stripe:
+                    other.set_focus_dimmed(False)
+                    continue
+                other.setEnabled(False)
+                other.set_focus_blackout(1.0)
+            except RuntimeError:
+                continue
+
+        self.title.hide()
+        self.back_button.hide()
+        self.forward_button.hide()
+        self.day_label.hide()
+        self.add_task_button.hide()
+        self.debug_label.hide()
+        self._set_focus_tint()
+        self._ensure_opacity_effect(self.focus_tint_overlay).setOpacity(1.0)
+        self.focus_tint_overlay.show()
+        self.focus_tint_overlay.raise_()
+
+        stripe.set_focus_mode(True)
+        global_tl = stripe.mapToGlobal(QPoint(0, 0))
+        local_tl = self.mapFromGlobal(global_tl)
+        stripe.setParent(self)
+        stripe.setGeometry(QRect(local_tl.x(), local_tl.y(), stripe.width(), stripe.height()))
+        stripe.show()
+        target_y = max(0, int((self.height() - stripe.height()) / 2))
+        target_x = int((self.width() - stripe.width()) / 2)
+        stripe.move(target_x, target_y)
+        stripe.raise_()
+        self._focus_reparented = True
+
+    def exit_focus_mode(self, on_finished=None) -> None:
         if not self._focus_mode_active:
             return
         if self._focus_transition_group and self._focus_transition_group.state() == QAbstractAnimation.State.Running:
@@ -1696,6 +1853,8 @@ class LemonDoWidget(QWidget):
             self._focused_stripe = None
             self.main_layout.setEnabled(True)
             self.recenter_ui(animated=True)
+            if callable(on_finished):
+                on_finished()
 
         transition.finished.connect(done)
         self._focus_transition_group = transition
@@ -2147,6 +2306,11 @@ class LemonDoWidget(QWidget):
 
     def keyPressEvent(self, event) -> None:
         self._reset_idle_timer()
+        if self._focus_mode_active:
+            if event.key() == Qt.Key.Key_Escape:
+                self.close()
+            event.accept()
+            return
         key = event.key()
         if key == Qt.Key.Key_Tab:
             if self._handle_tab_hotkey():
@@ -2190,10 +2354,14 @@ class LemonDoWidget(QWidget):
         event.accept()
 
     def toggle_add_button_visibility(self) -> None:
+        if self._focus_mode_active:
+            return
         self.add_button_visible = not self.add_button_visible
         self.recenter_ui(animated=True)
 
     def nuke_all_task_data(self) -> None:
+        if self._focus_mode_active:
+            return
         self._interrupt_and_snap_animations()
         self.particles.clear()
         if hasattr(self, "particle_timer"):
