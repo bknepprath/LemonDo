@@ -130,6 +130,119 @@ class LemonLogoWidget(QWidget):
         painter.drawEllipse(QRectF(leaf_x - leaf_w / 2, leaf_y - leaf_h / 2, leaf_w, leaf_h))
 
 
+class BirdsEyeGridWidget(QWidget):
+    day_hovered = pyqtSignal(object)
+    day_selected = pyqtSignal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._year = date.today().year
+        self._completed_days: set[date] = set()
+        self._hover_index: int | None = None
+        self._mouse_pos: QPointF | None = None
+        self.setMouseTracking(True)
+
+    def set_data(self, year: int, completed_days: set[date]) -> None:
+        self._year = year
+        self._completed_days = completed_days
+        self.update()
+
+    def _grid_metrics(self) -> tuple[int, int, int, int, int, int, int]:
+        cols = 19
+        rows = 20
+        total_days = 365
+        pad_x = 12
+        pad_y = 10
+        gap = 3
+        cell_w = max(6, int((self.width() - pad_x * 2 - (cols - 1) * gap) / cols))
+        cell_h = max(6, int((self.height() - pad_y * 2 - (rows - 1) * gap) / rows))
+        return cols, rows, total_days, pad_x, pad_y, gap, min(cell_w, cell_h)
+
+    def _index_at_pos(self, pos: QPointF) -> int | None:
+        cols, _rows, total_days, pad_x, pad_y, gap, cell = self._grid_metrics()
+        x = pos.x() - pad_x
+        y = pos.y() - pad_y
+        if x < 0 or y < 0:
+            return None
+        stride = cell + gap
+        c = int(x // stride)
+        r = int(y // stride)
+        if c < 0 or c >= cols or r < 0:
+            return None
+        in_cell_x = x - c * stride
+        in_cell_y = y - r * stride
+        if in_cell_x > cell or in_cell_y > cell:
+            return None
+        idx = r * cols + c
+        if idx < 0 or idx >= total_days:
+            return None
+        return idx
+
+    def _date_for_index(self, idx: int | None) -> date | None:
+        if idx is None:
+            return None
+        return date(self._year, 1, 1) + timedelta(days=idx)
+
+    def mouseMoveEvent(self, event) -> None:
+        self._mouse_pos = event.position()
+        idx = self._index_at_pos(event.position())
+        if idx != self._hover_index:
+            self._hover_index = idx
+            self.day_hovered.emit(self._date_for_index(idx))
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._mouse_pos = None
+        self._hover_index = None
+        self.day_hovered.emit(None)
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            idx = self._index_at_pos(event.position())
+            target = self._date_for_index(idx)
+            if target is not None:
+                self.day_selected.emit(target)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        cols, _rows, total_days, pad_x, pad_y, gap, cell = self._grid_metrics()
+        year_start = date(self._year, 1, 1)
+
+        for idx in range(total_days):
+            r = idx // cols
+            c = idx % cols
+            x = float(pad_x + c * (cell + gap))
+            y = float(pad_y + r * (cell + gap))
+            if self._mouse_pos is not None and idx != self._hover_index:
+                center_x = x + cell / 2
+                center_y = y + cell / 2
+                dx = center_x - self._mouse_pos.x()
+                dy = center_y - self._mouse_pos.y()
+                dist = max(1.0, math.hypot(dx, dy))
+                # Push boxes slightly away from cursor for easier selection.
+                repel = min(2.6, 75.0 / dist)
+                x += (dx / dist) * repel
+                y += (dy / dist) * repel
+            rect = QRectF(x, y, float(cell), float(cell))
+            day_value = year_start + timedelta(days=idx)
+            if day_value in self._completed_days:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#000000"))
+                painter.drawRect(rect)
+            else:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor("#000000"), 1.0))
+                painter.drawRect(rect)
+
+
 class FocusOverlay(QWidget):
     long_pressed = pyqtSignal()
 
@@ -743,11 +856,6 @@ class LemonDoWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self._window_shadow = QGraphicsDropShadowEffect(self)
-        self._window_shadow.setBlurRadius(34.0)
-        self._window_shadow.setOffset(0.0, 8.0)
-        self._window_shadow.setColor(QColor(0, 0, 0, 120))
-        self.setGraphicsEffect(self._window_shadow)
 
         self.background_color = self.MORNING_BG
         self.button_color = self.MORNING_BUTTON
@@ -922,6 +1030,12 @@ class LemonDoWidget(QWidget):
         self.info_overlay_title = QLabel(self.info_overlay)
         self.info_overlay_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_overlay_layout.addWidget(self.info_overlay_title)
+        self.birds_eye_grid = BirdsEyeGridWidget(self.info_overlay)
+        self.birds_eye_grid.setMinimumSize(220, 290)
+        self.birds_eye_grid.setVisible(False)
+        self.birds_eye_grid.day_hovered.connect(self.on_birds_eye_day_hovered)
+        self.birds_eye_grid.day_selected.connect(self.on_birds_eye_day_selected)
+        self.info_overlay_layout.addWidget(self.birds_eye_grid, 0, Qt.AlignmentFlag.AlignCenter)
         self.info_overlay_body = QLabel(self.info_overlay)
         self.info_overlay_body.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_overlay_body.setWordWrap(True)
@@ -1499,19 +1613,43 @@ class LemonDoWidget(QWidget):
 
     def _hotkeys_overlay_text(self) -> str:
         return (
+            "Left/Right - Navigate history days\n"
+            "Tab - Jump/add task while editing\n"
+            "Esc - Exit app\n"
+            "Right click window - Hibernate\n"
+            "Long press task - Enter focus mode\n"
+            "\n"
+            "Q - Return to today's default view\n"
+            "B - Open/close Bird's Eye year grid\n"
             "Space - Toggle this hotkey menu\n"
             "C - Open/close clock view\n"
             "S - Open/close stats view\n"
             "H - Toggle debug time label\n"
-            "N - Nuke all task data\n"
-            "Tab - Jump/add task while editing\n"
-            "Left/Right - Navigate history days\n"
             "Up/Down - Time travel debug\n"
             "R - Reset spoofed time\n"
-            "Esc - Exit app\n"
-            "Right click window - Hibernate\n"
-            "Long press task - Enter focus mode"
+            "N - Nuke all task data"
         )
+
+    def _year_completed_days(self, year: int) -> set[date]:
+        start = date(year, 1, 1).isoformat()
+        end = date(year, 12, 31).isoformat()
+        rows = self.db.execute(
+            """
+            SELECT day, COUNT(*) as completed_count
+            FROM tasks
+            WHERE status = 'COMPLETED' AND day >= ? AND day <= ?
+            GROUP BY day
+            HAVING completed_count >= 3
+            """,
+            (start, end),
+        ).fetchall()
+        out: set[date] = set()
+        for day_key, _count in rows:
+            try:
+                out.add(date.fromisoformat(str(day_key)))
+            except Exception:
+                continue
+        return out
 
     def _stats_overlay_text(self) -> str:
         completed = len([b for b in self.buttons if b.state == TaskStripe.COMPLETED and not b.is_deleting])
@@ -1583,20 +1721,36 @@ class LemonDoWidget(QWidget):
 
         if mode == "hotkeys":
             self.info_overlay_title.show()
+            self.birds_eye_grid.hide()
+            self.info_overlay_body.show()
+            self.day_label.hide()
             self.info_overlay_title.setText("Keyboard Hotkeys")
             self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
             self.info_overlay_body.setFont(QFont(self.font().family(), 13))
             self.info_overlay_body.setText(self._hotkeys_overlay_text())
         elif mode == "clock":
             self.info_overlay_title.hide()
+            self.birds_eye_grid.hide()
+            self.info_overlay_body.show()
+            self.day_label.hide()
             self.info_overlay_body.setFont(self._clock_overlay_font())
             self.info_overlay_body.setText(self._clock_overlay_text())
         elif mode == "stats":
             self.info_overlay_title.show()
+            self.birds_eye_grid.hide()
+            self.info_overlay_body.show()
+            self.day_label.hide()
             self.info_overlay_title.setText("Stats")
             self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
             self.info_overlay_body.setFont(QFont(self.font().family(), 13))
             self.info_overlay_body.setText(self._stats_overlay_text())
+        elif mode == "birds":
+            self.info_overlay_title.hide()
+            self.info_overlay_body.hide()
+            self.birds_eye_grid.show()
+            self.day_label.hide()
+            year = self.get_app_time().date().year
+            self.birds_eye_grid.set_data(year, self._year_completed_days(year))
         else:
             return
         self.info_overlay.raise_()
@@ -1630,6 +1784,35 @@ class LemonDoWidget(QWidget):
             self.info_overlay_body.setText(self._clock_overlay_text())
         elif self._overlay_mode == "stats":
             self.info_overlay_body.setText(self._stats_overlay_text())
+        elif self._overlay_mode == "birds":
+            year = self.get_app_time().date().year
+            self.birds_eye_grid.set_data(year, self._year_completed_days(year))
+
+    def on_birds_eye_day_hovered(self, day_value: date | None) -> None:
+        if self._overlay_mode != "birds":
+            return
+        if day_value is None:
+            self.day_label.hide()
+            return
+        self.day_label.setText(day_value.strftime("%b %d"))
+        self.day_label.show()
+        self.day_label.raise_()
+
+    def on_birds_eye_day_selected(self, day_value: date) -> None:
+        if self._overlay_mode != "birds":
+            return
+        today = self._navigation_today()
+        if day_value > today:
+            return
+        self._set_overlay_mode(None, animated=False)
+        self.day_label.hide()
+        if day_value == self.view_date:
+            self._update_nav_buttons()
+            return
+        self._interrupt_and_snap_animations()
+        self._save_current_day()
+        self._load_day(day_value)
+        self._update_nav_buttons()
 
     def _play_wake_overlay(self, color: QColor) -> None:
         if not hasattr(self, "wake_overlay"):
@@ -1672,6 +1855,21 @@ class LemonDoWidget(QWidget):
         effect.setOpacity(1.0)
         self.wake_overlay.show()
         self.wake_overlay.raise_()
+
+    def go_to_default_today_view(self) -> None:
+        if self._focus_mode_active:
+            return
+        if self._overlay_mode is not None:
+            self._set_overlay_mode(None, animated=False)
+        self.day_label.hide()
+        target = self._navigation_today()
+        if self.view_date == target:
+            self._update_nav_buttons()
+            return
+        self._interrupt_and_snap_animations()
+        self._save_current_day()
+        self._load_day(target)
+        self._update_nav_buttons()
 
     def enter_hibernate(self) -> None:
         if self.is_hibernated:
@@ -2726,6 +2924,14 @@ class LemonDoWidget(QWidget):
             self._toggle_overlay_mode("stats")
             event.accept()
             return
+        if key == Qt.Key.Key_B:
+            self._toggle_overlay_mode("birds")
+            event.accept()
+            return
+        if key == Qt.Key.Key_Q:
+            self.go_to_default_today_view()
+            event.accept()
+            return
         if key == Qt.Key.Key_Tab:
             if self._handle_tab_hotkey():
                 event.accept()
@@ -3040,7 +3246,6 @@ class LemonDoWidget(QWidget):
             self.pill_path = QPainterPath()
             self.pill_path.addRoundedRect(QRectF(self.rect()), radius, radius)
         painter.setClipPath(self.pill_path)
-        rect = QRectF(self.rect().adjusted(2, 2, -2, -2))
         fill_color = QColor("#000000") if (self.is_hibernated and self._hibernate_from_focus) else self.background_color
         painter.fillPath(self.pill_path, fill_color)
 
