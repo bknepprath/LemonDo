@@ -105,6 +105,31 @@ class ParticleOverlay(QWidget):
             painter.drawEllipse(p.pos, p.radius, p.radius)
 
 
+class LemonLogoWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        white = QColor(255, 255, 255, int(255 * 0.30))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(white)
+        cx = self.width() / 2
+        cy = self.height() / 2 + 2
+        # Flat minimal body: plain circle.
+        body_d = 32.0
+        painter.drawEllipse(QRectF(cx - body_d / 2, cy - body_d / 2, body_d, body_d))
+        # Detached minimalist leaf.
+        leaf_w = 16.0
+        leaf_h = 8.0
+        leaf_x = cx + 14.0
+        leaf_y = cy - 24.0
+        painter.drawEllipse(QRectF(leaf_x - leaf_w / 2, leaf_y - leaf_h / 2, leaf_w, leaf_h))
+
+
 class FocusOverlay(QWidget):
     long_pressed = pyqtSignal()
 
@@ -718,6 +743,11 @@ class LemonDoWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
+        self._window_shadow = QGraphicsDropShadowEffect(self)
+        self._window_shadow.setBlurRadius(34.0)
+        self._window_shadow.setOffset(0.0, 8.0)
+        self._window_shadow.setColor(QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(self._window_shadow)
 
         self.background_color = self.MORNING_BG
         self.button_color = self.MORNING_BUTTON
@@ -805,13 +835,8 @@ class LemonDoWidget(QWidget):
         layout.setSpacing(0)
 
         header = QWidget(self)
-        header.setFixedHeight(104)
-        self.title = QLabel("Lemon Do", self)
-        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_font = QFont(self.title_font_family or self.font().family(), 30)
-        title_font.setBold(True)
-        self.title.setFont(title_font)
-        self.title.setStyleSheet("color: rgb(20, 20, 20);")
+        header.setFixedHeight(0)
+        self.title = LemonLogoWidget(self)
         self.title.raise_()
 
         self.back_button = QPushButton("◀", self)
@@ -1497,13 +1522,16 @@ class LemonDoWidget(QWidget):
         focus_minutes, focus_rem = divmod(focus_seconds, 60)
         focus_hours, focus_minutes = divmod(focus_minutes, 60)
         return (
+            "Task Completion\n"
+            f"Task Completion: {completed}/{max(1, active_or_done)} ({completion_pct:.0f}%)\n"
             f"Time in focus mode: {focus_hours:02d}:{focus_minutes:02d}:{focus_rem:02d}\n"
-            f"Lifetime clicks: {self.stat_clicks}\n"
-            f"Lifetime tasks created: {self.stat_tasks_created}\n"
-            f"Lifetime tasks deleted: {self.stat_tasks_deleted}\n"
-            f"Lifetime tasks completed: {self.stat_tasks_completed}\n"
-            f"Most tasks completed in one day: {best_day}\n"
-            f"Task Completion: {completed}/{max(1, active_or_done)} ({completion_pct:.0f}%)"
+            "\n"
+            "Lifetime\n"
+            f"Clicks: {self.stat_clicks}\n"
+            f"Tasks created: {self.stat_tasks_created}\n"
+            f"Tasks deleted: {self.stat_tasks_deleted}\n"
+            f"Tasks completed: {self.stat_tasks_completed}\n"
+            f"Most tasks completed in one day: {best_day}"
         )
 
     def _clock_overlay_text(self) -> str:
@@ -1813,12 +1841,12 @@ class LemonDoWidget(QWidget):
             self.particle_overlay.raise_()
 
     def _position_title(self) -> None:
-        title_w = max(120, self.width() - 56)
-        title_h = 48
+        title_w = 96
+        title_h = 68
         x = int((self.width() - title_w) / 2)
-        self.title.setGeometry(x, 50, title_w, title_h)
+        self.title.setGeometry(x, self.height() - title_h - 10, title_w, title_h)
         self.title.raise_()
-        nav_y = self.title.y() + self.title.height() + 8
+        nav_y = 96
         self.back_button.setGeometry(34, nav_y, 28, 28)
         self.forward_button.setGeometry(self.width() - 62, nav_y, 28, 28)
         self.day_label.setGeometry(int((self.width() - 100) / 2), nav_y + 4, 100, 18)
@@ -2872,9 +2900,7 @@ class LemonDoWidget(QWidget):
             self.day_label.hide()
             self.debug_label.hide()
             return
-        self.title.setStyleSheet(
-            f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
-        )
+        self.title.update()
         self.sleep_label.setStyleSheet(
             f"font-size: 20px; font-weight: 600; color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
