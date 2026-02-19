@@ -29,10 +29,12 @@ from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
     QFontMetrics,
+    QIcon,
     QKeySequence,
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QRegion,
     QShortcut,
 )
@@ -70,6 +72,19 @@ def get_contrast_color(color: QColor | str) -> QColor:
 
 def minute_of_day(now: datetime) -> int:
     return now.hour * 60 + now.minute
+
+
+def build_lemon_icon() -> QIcon:
+    pix = QPixmap(128, 128)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    font = QFont("Segoe UI Emoji", 86)
+    painter.setFont(font)
+    painter.setPen(QColor("#F7D24B"))
+    painter.drawText(pix.rect(), int(Qt.AlignmentFlag.AlignCenter), "🍋")
+    painter.end()
+    return QIcon(pix)
 
 
 @dataclass
@@ -140,6 +155,8 @@ class BirdsEyeGridWidget(QWidget):
         self._completed_days: set[date] = set()
         self._hover_index: int | None = None
         self._mouse_pos: QPointF | None = None
+        self._hover_scale = 1.0
+        self._hover_anim: QVariantAnimation | None = None
         self.setMouseTracking(True)
 
     def set_data(self, year: int, completed_days: set[date]) -> None:
@@ -157,6 +174,19 @@ class BirdsEyeGridWidget(QWidget):
         cell_w = max(6, int((self.width() - pad_x * 2 - (cols - 1) * gap) / cols))
         cell_h = max(6, int((self.height() - pad_y * 2 - (rows - 1) * gap) / rows))
         return cols, rows, total_days, pad_x, pad_y, gap, min(cell_w, cell_h)
+
+    def _animate_hover_scale(self, target: float) -> None:
+        if self._hover_anim is not None and self._hover_anim.state() == QAbstractAnimation.State.Running:
+            self._hover_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(140)
+        anim.setStartValue(float(self._hover_scale))
+        anim.setEndValue(float(target))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(lambda v: setattr(self, "_hover_scale", float(v)))
+        anim.valueChanged.connect(lambda _v: self.update())
+        self._hover_anim = anim
+        anim.start()
 
     def _index_at_pos(self, pos: QPointF) -> int | None:
         cols, _rows, total_days, pad_x, pad_y, gap, cell = self._grid_metrics()
@@ -188,6 +218,7 @@ class BirdsEyeGridWidget(QWidget):
         idx = self._index_at_pos(event.position())
         if idx != self._hover_index:
             self._hover_index = idx
+            self._animate_hover_scale(1.32 if idx is not None else 1.0)
             self.day_hovered.emit(self._date_for_index(idx))
         self.update()
         super().mouseMoveEvent(event)
@@ -195,6 +226,7 @@ class BirdsEyeGridWidget(QWidget):
     def leaveEvent(self, event) -> None:
         self._mouse_pos = None
         self._hover_index = None
+        self._animate_hover_scale(1.0)
         self.day_hovered.emit(None)
         self.update()
         super().leaveEvent(event)
@@ -227,11 +259,19 @@ class BirdsEyeGridWidget(QWidget):
                 dx = center_x - self._mouse_pos.x()
                 dy = center_y - self._mouse_pos.y()
                 dist = max(1.0, math.hypot(dx, dy))
-                # Push boxes slightly away from cursor for easier selection.
-                repel = min(2.6, 75.0 / dist)
-                x += (dx / dist) * repel
-                y += (dy / dist) * repel
-            rect = QRectF(x, y, float(cell), float(cell))
+                # Wider influence radius + smoother falloff for eye-pleasing motion.
+                influence_radius = 320.0
+                if dist < influence_radius:
+                    t = (influence_radius - dist) / influence_radius
+                    repel = 6.0 * (t ** 1.35)
+                    x += (dx / dist) * repel
+                    y += (dy / dist) * repel
+            size = float(cell)
+            if idx == self._hover_index:
+                size = float(cell) * float(self._hover_scale)
+                x -= (size - cell) / 2.0
+                y -= (size - cell) / 2.0
+            rect = QRectF(x, y, size, size)
             day_value = year_start + timedelta(days=idx)
             if day_value in self._completed_days:
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -676,6 +716,20 @@ class TaskStripe(QWidget):
 
     def apply_theme(self, base_color: QColor) -> None:
         self._base_color = QColor(base_color)
+        if self._focus_mode:
+            self.setStyleSheet("background-color: transparent; border: none;")
+            text_color = get_contrast_color(QColor("#000000"))
+            self.focus_label.setStyleSheet(
+                "QLabel {"
+                f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()});"
+                "font-size: 20px;"
+                "font-weight: 700;"
+                "padding: 0px;"
+                "background: transparent;"
+                "border: none;"
+                "}"
+            )
+            return
         if self.is_deleting:
             deep_red = QColor("#6B1111")
             mixed = lerp_color(QColor(self._base_color), deep_red, self.deletion_progress)
@@ -856,6 +910,7 @@ class LemonDoWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
+        self.setWindowIcon(build_lemon_icon())
 
         self.background_color = self.MORNING_BG
         self.button_color = self.MORNING_BUTTON
@@ -898,6 +953,15 @@ class LemonDoWidget(QWidget):
         self._focus_transition_group: QParallelAnimationGroup | None = None
         self._focus_reparented = False
         self._delete_in_progress = False
+        self._pending_deletes: list[tuple[float, TaskStripe]] = []
+        self._pending_adds: list[tuple[float, TaskStripe]] = []
+        self._pending_completions: list[tuple[float, TaskStripe]] = []
+        self._delete_queue_timer = QTimer(self)
+        self._delete_queue_timer.setSingleShot(True)
+        self._delete_queue_timer.timeout.connect(self._process_delete_queue)
+        self._action_queue_timer = QTimer(self)
+        self._action_queue_timer.setSingleShot(True)
+        self._action_queue_timer.timeout.connect(self._process_pending_actions)
         self._hibernate_from_focus = False
         self._hibernate_focus_target: TaskStripe | None = None
         self._wake_overlay_anim: QPropertyAnimation | None = None
@@ -961,7 +1025,7 @@ class LemonDoWidget(QWidget):
 
         self.day_label = QLabel(self)
         self.day_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.day_label.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 0.6px;")
+        self.day_label.setStyleSheet("font-size: 18px; font-weight: 700; letter-spacing: 0.6px;")
         self.day_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.day_label.raise_()
 
@@ -1031,7 +1095,7 @@ class LemonDoWidget(QWidget):
         self.info_overlay_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_overlay_layout.addWidget(self.info_overlay_title)
         self.birds_eye_grid = BirdsEyeGridWidget(self.info_overlay)
-        self.birds_eye_grid.setMinimumSize(220, 290)
+        self.birds_eye_grid.setMinimumSize(180, 190)
         self.birds_eye_grid.setVisible(False)
         self.birds_eye_grid.day_hovered.connect(self.on_birds_eye_day_hovered)
         self.birds_eye_grid.day_selected.connect(self.on_birds_eye_day_selected)
@@ -1042,6 +1106,7 @@ class LemonDoWidget(QWidget):
         self.info_overlay_layout.addWidget(self.info_overlay_body)
         self.info_overlay_layout.addStretch(1)
         self._update_overlay_theme()
+        self._position_birds_eye_grid()
 
         self._update_nav_buttons()
 
@@ -1546,6 +1611,13 @@ class LemonDoWidget(QWidget):
                 continue
         self._running_animations.clear()
         self._animation_targets.clear()
+        self._pending_deletes.clear()
+        self._pending_adds.clear()
+        self._pending_completions.clear()
+        if self._delete_queue_timer.isActive():
+            self._delete_queue_timer.stop()
+        if self._action_queue_timer.isActive():
+            self._action_queue_timer.stop()
         if hasattr(self, "add_task_button"):
             self.add_task_button.setEnabled(True)
         self._delete_in_progress = False
@@ -1657,19 +1729,18 @@ class LemonDoWidget(QWidget):
         completion_pct = (completed / max(1, active_or_done)) * 100.0 if active_or_done else 0.0
         best_day = self._best_completed_day_count()
         focus_seconds = int(self._focus_elapsed_seconds())
-        focus_minutes, focus_rem = divmod(focus_seconds, 60)
-        focus_hours, focus_minutes = divmod(focus_minutes, 60)
+        focus_hours = focus_seconds // 3600
+        focus_minutes = (focus_seconds % 3600) // 60
         return (
-            "Task Completion\n"
             f"Task Completion: {completed}/{max(1, active_or_done)} ({completion_pct:.0f}%)\n"
-            f"Time in focus mode: {focus_hours:02d}:{focus_minutes:02d}:{focus_rem:02d}\n"
+            f"Time in focus mode: {focus_hours}h{focus_minutes}m\n"
             "\n"
-            "Lifetime\n"
+            "<b>Lifetime</b>\n"
             f"Clicks: {self.stat_clicks}\n"
             f"Tasks created: {self.stat_tasks_created}\n"
             f"Tasks deleted: {self.stat_tasks_deleted}\n"
             f"Tasks completed: {self.stat_tasks_completed}\n"
-            f"Most tasks completed in one day: {best_day}"
+            f"Most tasks in one day: {best_day}"
         )
 
     def _clock_overlay_text(self) -> str:
@@ -1724,7 +1795,7 @@ class LemonDoWidget(QWidget):
             self.birds_eye_grid.hide()
             self.info_overlay_body.show()
             self.day_label.hide()
-            self.info_overlay_title.setText("Keyboard Hotkeys")
+            self.info_overlay_title.setText("Hotkeys")
             self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
             self.info_overlay_body.setFont(QFont(self.font().family(), 13))
             self.info_overlay_body.setText(self._hotkeys_overlay_text())
@@ -1747,6 +1818,7 @@ class LemonDoWidget(QWidget):
         elif mode == "birds":
             self.info_overlay_title.hide()
             self.info_overlay_body.hide()
+            self._position_birds_eye_grid()
             self.birds_eye_grid.show()
             self.day_label.hide()
             year = self.get_app_time().date().year
@@ -2034,6 +2106,7 @@ class LemonDoWidget(QWidget):
             self.wake_overlay.setGeometry(self.rect())
         if hasattr(self, "info_overlay"):
             self.info_overlay.setGeometry(self.rect())
+            self._position_birds_eye_grid()
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.setGeometry(self.rect())
             self.particle_overlay.raise_()
@@ -2059,6 +2132,21 @@ class LemonDoWidget(QWidget):
         y = self.height() - overlay_h - 12
         self.debug_label.setGeometry(x, y, overlay_w, overlay_h)
 
+    def _position_birds_eye_grid(self) -> None:
+        if not hasattr(self, "birds_eye_grid") or not hasattr(self, "info_overlay"):
+            return
+        avail_w = max(120, self.info_overlay.width() - 56)
+        avail_h = max(140, self.info_overlay.height() - 120)
+        # Preserve 19x20 shape so cells remain square-ish and centered.
+        w_from_h = int(avail_h * 19 / 20)
+        if w_from_h <= avail_w:
+            target_w = w_from_h
+            target_h = avail_h
+        else:
+            target_w = avail_w
+            target_h = int(avail_w * 20 / 19)
+        self.birds_eye_grid.setFixedSize(max(120, target_w), max(126, target_h))
+
     def on_stripe_height_changed(self) -> None:
         if self._completion_in_progress:
             return
@@ -2071,7 +2159,9 @@ class LemonDoWidget(QWidget):
             self.stat_tasks_created += 1
             self._lifetime_stats_dirty = True
         if animate:
-            self._animate_add_task_sequence(stripe)
+            self.recenter_ui(animated=False)
+            self._pending_adds.append((time.monotonic() + 1.5, stripe))
+            self._schedule_pending_actions()
         else:
             self.recenter_ui(animated=False)
 
@@ -2148,34 +2238,61 @@ class LemonDoWidget(QWidget):
         if self._focus_mode_active:
             self.exit_focus_mode()
             return
-        if self._delete_in_progress:
-            return
         if stripe not in self.buttons or stripe.is_deleting:
             return
-        self._interrupt_and_snap_animations()
+        stripe.begin_delete_visual()
+        stripe.set_delete_progress(1.0)
+        ready_at = time.monotonic() + 1.5
+        self._pending_deletes.append((ready_at, stripe))
+        self._schedule_delete_queue()
+
+    def _schedule_delete_queue(self) -> None:
+        if self._delete_in_progress:
+            return
+        now = time.monotonic()
+        self._pending_deletes = [(t, s) for t, s in self._pending_deletes if s in self.buttons and s.is_deleting]
+        if not self._pending_deletes:
+            if self._delete_queue_timer.isActive():
+                self._delete_queue_timer.stop()
+            return
+        next_time = min(t for t, _s in self._pending_deletes)
+        delay_ms = max(0, int((next_time - now) * 1000))
+        self._delete_queue_timer.start(delay_ms)
+
+    def _process_delete_queue(self) -> None:
+        if self._delete_in_progress:
+            return
+        now = time.monotonic()
+        self._pending_deletes = [(t, s) for t, s in self._pending_deletes if s in self.buttons and s.is_deleting]
+        if not self._pending_deletes:
+            return
+        ready_idx = None
+        for i, (t, _s) in enumerate(self._pending_deletes):
+            if t <= now:
+                ready_idx = i
+                break
+        if ready_idx is None:
+            self._schedule_delete_queue()
+            return
+        _t, stripe = self._pending_deletes.pop(ready_idx)
+        self._run_delete_animation(stripe)
+
+    def _run_delete_animation(self, stripe: TaskStripe) -> None:
+        if stripe not in self.buttons or not stripe.is_deleting:
+            self._schedule_delete_queue()
+            return
         self._delete_in_progress = True
         epoch = self._animation_epoch
-        stripe.begin_delete_visual()
         start_rect = QRect(stripe.geometry())
         drop_rect = QRect(start_rect)
         drop_rect.moveTop(start_rect.y() + max(120, int(self.height() * 0.24)))
 
-        # Stage 1: immediate red shift.
-        red_shift = QVariantAnimation(self)
-        red_shift.setDuration(120)
-        red_shift.setStartValue(0.0)
-        red_shift.setEndValue(1.0)
-        red_shift.setEasingCurve(QEasingCurve.Type.OutCubic)
-        red_shift.valueChanged.connect(lambda v: stripe.set_delete_progress(float(v)))
-
-        # Stage 2: drop.
         drop_anim = QPropertyAnimation(stripe, b"geometry", self)
         drop_anim.setDuration(360)
         drop_anim.setStartValue(start_rect)
         drop_anim.setEndValue(drop_rect)
         drop_anim.setEasingCurve(QEasingCurve.Type.InCubic)
 
-        # Stage 3: dissolve while dropping.
         fade_anim = QVariantAnimation(self)
         fade_anim.setDuration(360)
         fade_anim.setStartValue(1.0)
@@ -2187,16 +2304,13 @@ class LemonDoWidget(QWidget):
         parallel.addAnimation(drop_anim)
         parallel.addAnimation(fade_anim)
 
-        sequence = QSequentialAnimationGroup(self)
-        sequence.addAnimation(red_shift)
-        sequence.addAnimation(parallel)
-
         self._register_animation(drop_anim, stripe, drop_rect)
-        self._register_animation(sequence)
+        self._register_animation(parallel)
 
         def finalize_delete() -> None:
             self._delete_in_progress = False
             if epoch != self._animation_epoch:
+                self._schedule_delete_queue()
                 return
             if stripe in self.buttons:
                 self.buttons.remove(stripe)
@@ -2213,9 +2327,57 @@ class LemonDoWidget(QWidget):
                 self._accordion_open = False
             self.recenter_ui(animated=True, interrupt=False)
             self._save_current_day()
+            self._process_delete_queue()
 
-        sequence.finished.connect(finalize_delete)
-        sequence.start()
+        parallel.finished.connect(finalize_delete)
+        parallel.start()
+
+    def _schedule_pending_actions(self) -> None:
+        if self._delete_in_progress or self._completion_in_progress:
+            self._action_queue_timer.start(120)
+            return
+        now = time.monotonic()
+        self._pending_completions = [
+            (t, s)
+            for t, s in self._pending_completions
+            if s in self.buttons and s.state == TaskStripe.COMPLETED and not s.is_deleting
+        ]
+        self._pending_adds = [(t, s) for t, s in self._pending_adds if s in self.buttons and not s.is_deleting]
+        if not self._pending_completions and not self._pending_adds:
+            if self._action_queue_timer.isActive():
+                self._action_queue_timer.stop()
+            return
+        next_time = min([t for t, _s in self._pending_completions] + [t for t, _s in self._pending_adds])
+        delay_ms = max(0, int((next_time - now) * 1000))
+        self._action_queue_timer.start(delay_ms)
+
+    def _process_pending_actions(self) -> None:
+        if self._delete_in_progress or self._completion_in_progress:
+            self._schedule_pending_actions()
+            return
+        now = time.monotonic()
+        self._pending_completions = [
+            (t, s)
+            for t, s in self._pending_completions
+            if s in self.buttons and s.state == TaskStripe.COMPLETED and not s.is_deleting
+        ]
+        self._pending_adds = [(t, s) for t, s in self._pending_adds if s in self.buttons and not s.is_deleting]
+
+        ready_completion_idx = next((i for i, (t, _s) in enumerate(self._pending_completions) if t <= now), None)
+        if ready_completion_idx is not None:
+            _t, stripe = self._pending_completions.pop(ready_completion_idx)
+            self.complete_task(stripe)
+            self._schedule_pending_actions()
+            return
+
+        ready_add_idx = next((i for i, (t, _s) in enumerate(self._pending_adds) if t <= now), None)
+        if ready_add_idx is not None:
+            _t, stripe = self._pending_adds.pop(ready_add_idx)
+            self._animate_add_task_sequence(stripe)
+            self._schedule_pending_actions()
+            return
+
+        self._schedule_pending_actions()
 
     def on_stripe_state_changed(self) -> None:
         if self._focus_mode_active:
@@ -2229,7 +2391,8 @@ class LemonDoWidget(QWidget):
                 self._lifetime_stats_dirty = True
                 stripe.completion_rank = self._completed_counter
                 self._completed_counter += 1
-                self.complete_task(stripe)
+                self._pending_completions.append((time.monotonic() + 1.5, stripe))
+                self._schedule_pending_actions()
                 return
             elif stripe.state != TaskStripe.COMPLETED and stripe.completion_rank is not None:
                 stripe.completion_rank = None
@@ -3111,7 +3274,7 @@ class LemonDoWidget(QWidget):
             f"font-size: 20px; font-weight: 600; color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
         self.day_label.setStyleSheet(
-            "font-size: 11px; font-weight: 700; letter-spacing: 0.6px;"
+            "font-size: 18px; font-weight: 700; letter-spacing: 0.6px;"
             f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
         )
 
@@ -3260,6 +3423,7 @@ class LemonDoWidget(QWidget):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(build_lemon_icon())
 
     script_dir = Path(__file__).resolve().parent
     fonts_dir = script_dir / "fonts"
