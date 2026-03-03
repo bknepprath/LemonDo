@@ -1199,10 +1199,16 @@ class LemonDoWidget(QWidget):
             """
             CREATE TABLE IF NOT EXISTS app_stats (
                 key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL DEFAULT 0
+                value INTEGER NOT NULL DEFAULT 0,
+                value_str TEXT
             )
             """
         )
+        # Attempt to add value_str column if it doesn't exist (for existing databases)
+        try:
+            self.db.execute("ALTER TABLE app_stats ADD COLUMN value_str TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self.db.commit()
 
     def _load_lifetime_stats(self) -> None:

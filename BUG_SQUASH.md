@@ -8,6 +8,11 @@ None currently tracked.
 
 ## Recently Resolved
 
+### BUG-027: Startup crash (OperationalError: no such column: value_str)
+- Severity: critical
+- Status: resolved
+- Fix: Updated `_ensure_schema` to explicitly add the `value_str` column to `app_stats` if it's missing, ensuring backward compatibility with existing databases.
+
 ### BUG-021: Startup failure after shadow render change
 - Severity: critical
 - Status: resolved
