@@ -13,6 +13,11 @@ None currently tracked.
 - Status: resolved
 - Fix: Updated `_ensure_schema` to explicitly add the `value_str` column to `app_stats` if it's missing, ensuring backward compatibility with existing databases.
 
+### BUG-028: Runtime crash when toggling settings
+- Severity: critical
+- Status: resolved
+- Fix: Corrected malformed SQL in `_save_lifetime_stats` where an `INSERT INTO` statement was truncated, causing a crash on database persistence.
+
 ### BUG-021: Startup failure after shadow render change
 - Severity: critical
 - Status: resolved

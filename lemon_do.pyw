@@ -1247,7 +1247,7 @@ class LemonDoWidget(QWidget):
             for key, value in rows:
                 self.db.execute(
                     """
-                    VALUES(?, ?)
+                    INSERT INTO app_stats(key, value) VALUES(?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
                     (key, value),
@@ -1259,16 +1259,6 @@ class LemonDoWidget(QWidget):
                 """,
                 (int(self.debug_mode_enabled),),
             )
-            self.db.execute(
-                "ALTER TABLE app_stats ADD COLUMN value_str TEXT"
-            ) if self.db.execute("PRAGMA table_info(app_stats)").fetchone() and "value_str" not in [x[1] for x in self.db.execute("PRAGMA table_info(app_stats)").fetchall()] else None
-            
-            # Simplified approach for schema change: check if column exists
-            try:
-                self.db.execute("ALTER TABLE app_stats ADD COLUMN value_str TEXT")
-            except sqlite3.OperationalError:
-                pass # Already exists
-                
             self.db.execute(
                 """
                 INSERT INTO app_stats(key, value_str) VALUES('settings_palette', ?)
