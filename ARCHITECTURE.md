@@ -1,6 +1,6 @@
 # Lemon Do Architecture (Agent-Oriented)
 
-Last updated: 2026-03-03 01:12:00 (Settings Architecture Update)
+Last updated: 2026-03-03 01:27:00 (Full Task Architecture Update)
 
 ## Entry Point
 
@@ -28,6 +28,8 @@ Last updated: 2026-03-03 01:12:00 (Settings Architecture Update)
 - `FocusOverlay`: focus-mode blackout interaction surface.
 - `BirdsEyeGridWidget`: yearly grid render + hover/click hit-testing.
 - `LemonLogoWidget`: minimal brand glyph.
+- `FullTaskOverlay`: Scrollable task browser with manual layout for drag-and-drop.
+- `FullTaskStripe`: Compact task entry for list view with stars and bump-tomorrow button.
 
 ## High-Value State Flags
 
@@ -35,7 +37,7 @@ Last updated: 2026-03-03 01:12:00 (Settings Architecture Update)
 - `is_hibernated`
 - `_completion_in_progress`
 - `_delete_in_progress`
-- `_overlay_mode` (`hotkeys`, `clock`, `stats`, `birds`, `settings`, `None`)
+- `_overlay_mode` (`hotkeys`, `clock`, `stats`, `birds`, `settings`, `full_tasks`, `None`)
 - `debug_mode_enabled` (bool, persists to `app_stats`)
 - `current_palette` (str, persists to `app_stats`)
 - `_pending_adds`, `_pending_completions`, `_pending_deletes` (queued hold flows)
@@ -79,7 +81,7 @@ Last updated: 2026-03-03 01:12:00 (Settings Architecture Update)
 ## Persistence Notes
 
 - SQLite WAL enabled.
-- `tasks` table = per-day task history.
+- `tasks` table = per-day task history (fields: `status`, `text`, `completion_rank`, `priority`, `sort_index`, `created_at`).
 - `app_stats` table = lifetime counters.
 
 ## Hotkey Handling Strategy

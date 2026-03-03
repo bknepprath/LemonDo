@@ -47,6 +47,9 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLayout,
     QPushButton,
+    QScrollArea,
+    QScroller,
+    QScrollerProperties,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -881,6 +884,339 @@ class TaskStripe(QWidget):
         group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
 
+class FullTaskStripe(QFrame):
+    """Compact task item for the 'Full Task' view."""
+    completed = pyqtSignal(object)  # Emits self
+    bumped = pyqtSignal(object)     # Emits self
+    priority_changed = pyqtSignal(object) # Emits self
+    drag_started = pyqtSignal(object, QPoint) # Emits self, local_pos
+
+    def __init__(self, task_data: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.task_data = task_data
+        self.setFixedHeight(46)
+        self.setMouseTracking(True)
+        self._base_color = QColor("#FAEE69")
+        self._is_dragging = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(10)
+
+        # Check button
+        self.check_button = QPushButton("○", self)
+        self.check_button.setFixedSize(26, 26)
+        self.check_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check_button.clicked.connect(lambda: self.completed.emit(self))
+        layout.addWidget(self.check_button)
+
+        # Content: Date + Text
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setSpacing(0)
+        
+        self.date_label = QLabel(task_data.get("day", ""), self)
+        self.date_label.setStyleSheet("font-size: 9px; font-weight: 800; opacity: 0.7;")
+        self.content_layout.addWidget(self.date_label)
+
+        self.text_label = QLabel(task_data.get("text", ""), self)
+        self.text_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        self.content_layout.addWidget(self.text_label)
+        layout.addLayout(self.content_layout, 1)
+
+        # Stars
+        self.stars_layout = QHBoxLayout()
+        self.stars_layout.setSpacing(2)
+        self.star_buttons = []
+        for i in range(1, 4):
+            btn = QPushButton("★", self)
+            btn.setFixedSize(20, 20)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, idx=i: self._set_priority(idx))
+            self.stars_layout.addWidget(btn)
+            self.star_buttons.append(btn)
+        layout.addLayout(self.stars_layout)
+
+        # Bump button
+        self.bump_button = QPushButton("→", self)
+        self.bump_button.setFixedSize(26, 26)
+        self.bump_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bump_button.setToolTip("Move to tomorrow")
+        self.bump_button.clicked.connect(lambda: self.bumped.emit(self))
+        layout.addWidget(self.bump_button)
+
+        self._refresh_stars()
+
+    def _set_priority(self, p: int) -> None:
+        old_p = self.task_data.get("priority", 0)
+        if old_p == p:
+            self.task_data["priority"] = 0
+        else:
+            self.task_data["priority"] = p
+        self._refresh_stars()
+        self.priority_changed.emit(self)
+
+    def _refresh_stars(self) -> None:
+        p = self.task_data.get("priority", 0)
+        for i, btn in enumerate(self.star_buttons):
+            if (i + 1) <= p:
+                btn.setStyleSheet("color: #FFD700; background: transparent; border: none; font-size: 16px;")
+            else:
+                btn.setStyleSheet("color: rgba(255, 255, 255, 40); background: transparent; border: none; font-size: 16px;")
+
+    def apply_theme(self, base_color: QColor) -> None:
+        self._base_color = base_color
+        text_color = get_contrast_color(base_color)
+        bg = lerp_color(base_color, QColor("#000000"), 0.05)
+        self.setStyleSheet(
+            f"FullTaskStripe {{ background-color: rgb({bg.red()}, {bg.green()}, {bg.blue()}); "
+            f"border-bottom: 1px solid rgba(255, 255, 255, 20); }}"
+        )
+        self.text_label.setStyleSheet(f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()}); font-size: 14px; font-weight: 600;")
+        self.date_label.setStyleSheet(f"color: rgba({text_color.red()}, {text_color.green()}, {text_color.blue()}, 160); font-size: 9px; font-weight: 800;")
+        
+        btn_style = (
+            "QPushButton {"
+            "background-color: rgba(0, 0, 0, 30);"
+            f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()});"
+            "border: 1px solid rgba(255, 255, 255, 30);"
+            "border-radius: 13px;"
+            "font-weight: 700;"
+            "}"
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 40); }"
+        )
+        self.check_button.setStyleSheet(btn_style)
+        self.bump_button.setStyleSheet(btn_style)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_started.emit(self, event.pos())
+        super().mousePressEvent(event)
+
+
+class FullTaskOverlay(QWidget):
+    """Scrollable list of all outstanding tasks with drag-and-drop reordering."""
+    def __init__(self, owner: "LemonDoWidget") -> None:
+        super().__init__(owner)
+        self.owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+
+        # Header area
+        self.header = QWidget(self)
+        self.header.setFixedHeight(60)
+        h_layout = QVBoxLayout(self.header)
+        h_layout.setContentsMargins(0, 20, 0, 0)
+        self.title_label = QLabel("Outstanding Tasks", self.header)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 24px; font-weight: 800;")
+        h_layout.addWidget(self.title_label)
+        self.layout.addWidget(self.header)
+
+        # Scroll Area
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("background: transparent; border: none;")
+        
+        # Enable touch-style kinetic scrolling
+        QScroller.grabGesture(self.scroll.viewport(), QScroller.ScrollerGesture.LeftMouseButtonGesture)
+        
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        # We'll use manual positioning for animations, so no layout on container
+        
+        self.scroll.setWidget(self.container)
+        self.layout.addWidget(self.scroll)
+
+        self.items: list[FullTaskStripe] = []
+        self._dragging_item: FullTaskStripe | None = None
+        self._drag_start_pos = QPoint()
+        self._drag_initial_rect = QRect()
+        self._placeholder_index = -1
+
+    def apply_theme(self, base_color: QColor) -> None:
+        bg = lerp_color(base_color, QColor("#000000"), 0.1)
+        self.setStyleSheet(f"background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, 245);")
+        text_color = get_contrast_color(base_color)
+        self.title_label.setStyleSheet(f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()}); font-size: 24px; font-weight: 800;")
+        for item in self.items:
+            item.apply_theme(base_color)
+
+    def refresh_tasks(self) -> None:
+        # Clear existing
+        for item in self.items:
+            item.setParent(None)
+            item.deleteLater()
+        self.items.clear()
+        
+        # Load from DB
+        # Order: priority DESC, sort_index ASC, created_at ASC
+        rows = self.owner.db.execute(
+            "SELECT day, task_id, status, text, completion_rank, priority, created_at, sort_index "
+            "FROM tasks WHERE status = 'ACTIVE' "
+            "ORDER BY priority DESC, sort_index ASC, created_at ASC"
+        ).fetchall()
+        
+        for row in rows:
+            data = {
+                "day": row[0], "task_id": row[1], "status": row[2],
+                "text": row[3], "completion_rank": row[4],
+                "priority": row[5], "created_at": row[6], "sort_index": row[7]
+            }
+            item = FullTaskStripe(data, self.container)
+            item.completed.connect(self._on_item_completed)
+            item.bumped.connect(self._on_item_bumped)
+            item.priority_changed.connect(self._on_item_priority_changed)
+            item.drag_started.connect(self._on_drag_started)
+            item.apply_theme(self.owner.button_color)
+            item.setParent(self.container)
+            self.items.append(item)
+        
+        self._update_item_positions(animated=False)
+
+    def _update_item_positions(self, animated: bool = True) -> None:
+        margin = 10
+        spacing = 4
+        y = margin
+        for i, item in enumerate(self.items):
+            if item == self._dragging_item:
+                continue
+            
+            target_idx = i
+            if self._dragging_item and i >= self._placeholder_index:
+                target_idx = i + 1
+            
+            target_y = margin + target_idx * (item.height() + spacing)
+            
+            if animated:
+                if not hasattr(item, "_pos_anim"):
+                    item._pos_anim = QPropertyAnimation(item, b"pos")
+                
+                if item._pos_anim.endValue() != QPoint(20, target_y):
+                    item._pos_anim.stop()
+                    item._pos_anim.setDuration(200)
+                    item._pos_anim.setStartValue(item.pos())
+                    item._pos_anim.setEndValue(QPoint(20, target_y))
+                    item._pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    item._pos_anim.start()
+            else:
+                if hasattr(item, "_pos_anim"):
+                    item._pos_anim.stop()
+                item.move(20, target_y)
+            y = target_y + item.height() + spacing
+        
+        self.container.setMinimumSize(self.width(), y + 60)
+
+    def _on_item_completed(self, item: FullTaskStripe) -> None:
+        d = item.task_data
+        self.owner.db.execute(
+            "UPDATE tasks SET status = 'COMPLETED', completion_rank = ? WHERE day = ? AND task_id = ?",
+            (int(time.time()), d["day"], d["task_id"])
+        )
+        self.owner.db.commit()
+        self.owner._full_tasks_dirty = True
+        self.refresh_tasks()
+
+    def _on_item_bumped(self, item: FullTaskStripe) -> None:
+        d = item.task_data
+        curr_date = date.fromisoformat(d["day"])
+        next_date = curr_date + timedelta(days=1)
+        next_day_str = next_date.isoformat()
+        
+        # Find new task_id for that day
+        res = self.owner.db.execute("SELECT MAX(task_id) FROM tasks WHERE day = ?", (next_day_str,)).fetchone()
+        new_id = (res[0] or 0) + 1
+        
+        self.owner.db.execute(
+            "UPDATE tasks SET day = ?, task_id = ? WHERE day = ? AND task_id = ?",
+            (next_day_str, new_id, d["day"], d["task_id"])
+        )
+        self.owner.db.commit()
+        self.owner._full_tasks_dirty = True
+        self.refresh_tasks()
+
+    def _on_item_priority_changed(self, item: FullTaskStripe) -> None:
+        d = item.task_data
+        self.owner.db.execute(
+            "UPDATE tasks SET priority = ? WHERE day = ? AND task_id = ?",
+            (d["priority"], d["day"], d["task_id"])
+        )
+        self.owner.db.commit()
+        self.refresh_tasks() # Re-sort
+
+    def _on_drag_started(self, item: FullTaskStripe, local_pos: QPoint) -> None:
+        self._dragging_item = item
+        self._drag_start_pos = local_pos
+        self._drag_initial_rect = item.geometry()
+        self._placeholder_index = self.items.index(item)
+        item.raise_()
+        item.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging_item:
+            # Move visually
+            container_pos = self.container.mapFrom(self, event.pos())
+            target_y = container_pos.y() - self._drag_start_pos.y()
+            self._dragging_item.move(self._drag_initial_rect.x(), target_y)
+            
+            # Find new placeholder index
+            new_idx = -1
+            mid_y = target_y + self._dragging_item.height() // 2
+            for i, other in enumerate(self.items):
+                if other == self._dragging_item: continue
+                other_mid = other.y() + other.height() // 2
+                if mid_y < other_mid:
+                    new_idx = i
+                    break
+            if new_idx == -1:
+                new_idx = len(self.items) - 1
+            
+            if new_idx != self._placeholder_index:
+                self._placeholder_index = new_idx
+                self._reorder_visuals()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._dragging_item:
+            self._dragging_item.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._finalize_reorder()
+            self._dragging_item = None
+        super().mouseReleaseEvent(event)
+
+    def _reorder_visuals(self) -> None:
+        self._update_item_positions(animated=True)
+
+    def _finalize_reorder(self) -> None:
+        if not self._dragging_item: return
+        old_idx = self.items.index(self._dragging_item)
+        new_idx = self._placeholder_index
+        if old_idx == new_idx:
+            self.refresh_tasks()
+            return
+            
+        item = self.items.pop(old_idx)
+        self.items.insert(new_idx, item)
+        
+        # Update sort_index for all items in the same priority group
+        # Actually simplest: update all sort_index for all ACTIVE tasks in this priority
+        p = item.task_data["priority"]
+        affected = [x for x in self.items if x.task_data["priority"] == p]
+        for i, itm in enumerate(affected):
+            itm.task_data["sort_index"] = i
+            self.owner.db.execute(
+                "UPDATE tasks SET sort_index = ? WHERE day = ? AND task_id = ?",
+                (i, itm.task_data["day"], itm.task_data["task_id"])
+            )
+        self.owner.db.commit()
+        self.refresh_tasks()
+
+
 class LemonDoWidget(QWidget):
     MORNING_BG = QColor("#FAEE69")          # 04:00 (extended)
     MORNING_BUTTON = QColor("#1A237E")
@@ -1009,6 +1345,7 @@ class LemonDoWidget(QWidget):
         self._day_nav_anim_group: QParallelAnimationGroup | None = None
         self._hibernate_overlay_mode: str | None = None
         self._lifetime_stats_dirty = False
+        self._full_tasks_dirty = True
         self.pill_path = QPainterPath()
         self.today_date = self.get_app_time().date()
         self.view_date = self.today_date
@@ -1139,6 +1476,10 @@ class LemonDoWidget(QWidget):
         self._update_overlay_theme()
         self._position_birds_eye_grid()
 
+        self.full_task_overlay = FullTaskOverlay(self)
+        self.full_task_overlay.setGeometry(self.rect())
+        self.full_task_overlay.hide()
+
         self._update_nav_buttons()
 
     def _setup_timers(self) -> None:
@@ -1190,6 +1531,9 @@ class LemonDoWidget(QWidget):
                 status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'EMPTY')),
                 text TEXT NOT NULL DEFAULT '',
                 completion_rank INTEGER,
+                priority INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sort_index INTEGER DEFAULT 0,
                 PRIMARY KEY (day, task_id)
             )
             """
@@ -1204,6 +1548,20 @@ class LemonDoWidget(QWidget):
             )
             """
         )
+        # Migrations for task priorities and ordering
+        try:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN sort_index INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        
         # Attempt to add value_str column if it doesn't exist (for existing databases)
         try:
             self.db.execute("ALTER TABLE app_stats ADD COLUMN value_str TEXT")
@@ -1450,6 +1808,10 @@ class LemonDoWidget(QWidget):
                 if self._handle_tab_hotkey():
                     event.accept()
                     return True
+            if event.key() == Qt.Key.Key_F:
+                self._toggle_overlay_mode("full_tasks")
+                event.accept()
+                return True
         elif event.type() == QEvent.Type.MouseButtonPress:
             self._reset_idle_timer()
             if (
@@ -1753,6 +2115,7 @@ class LemonDoWidget(QWidget):
             "Space - Toggle this hotkey menu\n"
             "C - Open/close clock view\n"
             "S - Open/close stats view\n"
+            "F - Open/close full task view\n"
             "G - Open/close settings\n"
             "H - Toggle debug time label\n"
             "Up/Down - Time travel debug (Debug Mode)\n"
@@ -1911,10 +2274,19 @@ class LemonDoWidget(QWidget):
             self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
             self.info_overlay_body.setFont(QFont(self.font().family(), 13))
             self.info_overlay_body.setText(self._settings_overlay_text())
+        elif mode == "full_tasks":
+            self.full_task_overlay.refresh_tasks()
+            self.full_task_overlay.show()
+            self.full_task_overlay.raise_()
+            self.info_overlay.hide() # Full task view is separate
+            return
         else:
             return
         self.info_overlay.raise_()
         self.info_overlay.show()
+        if self.full_task_overlay.isVisible():
+            self.full_task_overlay.hide()
+            
         if previous_mode is not None:
             if self._overlay_anim and self._overlay_anim.state() == QAbstractAnimation.State.Running:
                 self._overlay_anim.stop()
@@ -3242,6 +3614,10 @@ class LemonDoWidget(QWidget):
             self._toggle_overlay_mode("settings")
             event.accept()
             return
+        elif key == Qt.Key.Key_F:
+            self._toggle_overlay_mode("full_tasks")
+            event.accept()
+            return
         elif key == Qt.Key.Key_Up:
             if self.debug_mode_enabled:
                 self.time_offset += timedelta(minutes=10)
@@ -3489,6 +3865,8 @@ class LemonDoWidget(QWidget):
             self.focus_tint_overlay.raise_()
             if self._focused_stripe is not None:
                 self._focused_stripe.raise_()
+        if hasattr(self, "full_task_overlay"):
+            self.full_task_overlay.apply_theme(self.button_color)
         self.add_task_button.raise_()
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.raise_()

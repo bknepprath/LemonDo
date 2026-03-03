@@ -1,6 +1,6 @@
 # Lemon Do PRD (Current Build)
 
-Last updated: 2026-03-03 01:10:00 (Settings & Palettes Update)
+Last updated: 2026-03-03 01:25:00 (Full Task View & Priorities)
 
 ## Product Goal
 
@@ -68,7 +68,15 @@ Lemon Do is a compact always-on-top PyQt6 task widget for daily execution with:
     - **Mint**: Fresh green/teal tones.
     - **Maroon**: Deep red/brown tones.
     - **Grayscale**: Modern monochromatic tones.
-  - Settings are persisted across app restarts.
+  - **Full Task View**:
+  - Accessed via `F`.
+  - Lists all outstanding tasks from all days.
+  - Tasks show their original date.
+  - **Priority Stars**: Each task can have 1-3 stars (or 0).
+  - Star rank determines primary sorting order, followed by chronological creation.
+  - Drag and drop tasks to manually reorder them within the list.
+  - Right arrow button on any task to defer it ("Bump to tomorrow").
+- Settings are persisted across app restarts.
 
 Bird's Eye specifics:
 - 365-day grid.
@@ -86,6 +94,7 @@ Bird's Eye specifics:
 - `S`: Stats overlay
 - `Q`: return to today/default task view
 - `G`: Settings overlay
+- `F`: Full Task view overlay
 - `H`: toggle debug time chip
 - `N`: nuke all task data (active only in Debug Mode)
 - `Up` / `Down`: debug time offset (active only in Debug Mode)
