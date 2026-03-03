@@ -18,6 +18,12 @@ None currently tracked.
 - Status: resolved
 - Fix: Corrected malformed SQL in `_save_lifetime_stats` where an `INSERT INTO` statement was truncated, causing a crash on database persistence.
 
+### BUG-029: Startup crash (AttributeError: QScroller has no attribute ScrollerGesture)
+- Severity: critical
+- Status: active
+- Symptom: App fails to open with `AttributeError: type object 'QScroller' has no attribute 'ScrollerGesture'`.
+- Fix: TBD
+
 ### BUG-021: Startup failure after shadow render change
 - Severity: critical
 - Status: resolved

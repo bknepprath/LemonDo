@@ -37,6 +37,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QRegion,
     QShortcut,
+    QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -357,9 +358,23 @@ class StripeTextEdit(QTextEdit):
         self.setPlaceholderText("")
 
     def mousePressEvent(self, event) -> None:
+        self._drag_start_pos = event.pos()
         self.mouse_pressed.emit(event.button())
         self.clicked.emit()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            if (event.pos() - self._drag_start_pos).manhattanLength() > 10:
+                # Deliberate move: cancel long press and start drag
+                parent = self.parent()
+                if hasattr(parent, "stop_long_press"):
+                    parent.stop_long_press()
+                if hasattr(parent, "drag_started"):
+                    # Emit with initial click position for correct offset calculation
+                    parent.drag_started.emit(parent, self._drag_start_pos)
+                    return
+        super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         self.double_clicked.emit()
@@ -393,6 +408,7 @@ class TaskStripe(QWidget):
     completed_clicked = pyqtSignal(object)
     delete_requested = pyqtSignal(object)
     long_pressed = pyqtSignal(object)
+    drag_started = pyqtSignal(object, QPoint)
     focus_complete_requested = pyqtSignal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -445,6 +461,8 @@ class TaskStripe(QWidget):
         self._long_press_timer.setSingleShot(True)
         self._long_press_timer.setInterval(500)
         self._long_press_timer.timeout.connect(self._emit_long_press)
+        self._drag_start_pos = QPoint()
+
         self.check_button = QPushButton("✓", self)
         self.check_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.check_button.setFixedSize(30, 30)
@@ -469,12 +487,36 @@ class TaskStripe(QWidget):
         self._sync_state_with_text()
         self._adjust_height_to_content()
 
+    def stop_long_press(self) -> None:
+        self._long_press_timer.stop()
+
     def mousePressEvent(self, event) -> None:
-        if self._focus_mode and event.button() == Qt.MouseButton.LeftButton and self.state == self.ACTIVE:
-            self.focus_complete_requested.emit(self)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.pos()
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            if (event.pos() - self._drag_start_pos).manhattanLength() > 8:
+                if not self._focus_mode:
+                    self.stop_long_press()
+                    self.drag_started.emit(self, self._drag_start_pos)
+                    event.accept()
+                    return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            # If it was a short click on the stripe background, focus the editor
+            if (event.pos() - self._drag_start_pos).manhattanLength() <= 8:
+                self.editor.setFocus()
+                # Move cursor to end
+                cursor = self.editor.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                self.editor.setTextCursor(cursor)
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -855,142 +897,90 @@ class TaskStripe(QWidget):
         # Blackout in focus mode is handled by focus_blackout_cover.
 
     def play_bounce_animation(self) -> None:
-        original = self.geometry()
-        shrink_w = int(original.width() * 0.97)
-        shrink_h = int(original.height() * 0.9)
-        shrink_rect = original.adjusted(
-            (original.width() - shrink_w) // 2,
-            (original.height() - shrink_h) // 2,
-            -(original.width() - shrink_w) // 2,
-            -(original.height() - shrink_h) // 2,
-        )
+        pass
 
-        anim_down = QPropertyAnimation(self, b"geometry")
-        anim_down.setDuration(80)
-        anim_down.setStartValue(original)
-        anim_down.setEndValue(shrink_rect)
-        anim_down.setEasingCurve(QEasingCurve.Type.InOutQuad)
 
-        anim_up = QPropertyAnimation(self, b"geometry")
-        anim_up.setDuration(180)
-        anim_up.setStartValue(shrink_rect)
-        anim_up.setEndValue(original)
-        anim_up.setEasingCurve(QEasingCurve.Type.OutBounce)
-
-        group = QSequentialAnimationGroup(self)
-        group.addAnimation(anim_down)
-        group.addAnimation(anim_up)
-        self._anim_group = group
-        group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+    def play_bounce_animation(self) -> None:
+        pass
 
 
 class FullTaskStripe(QFrame):
     """Compact task item for the 'Full Task' view."""
-    completed = pyqtSignal(object)  # Emits self
-    bumped = pyqtSignal(object)     # Emits self
-    priority_changed = pyqtSignal(object) # Emits self
-    drag_started = pyqtSignal(object, QPoint) # Emits self, local_pos
+    drag_started = pyqtSignal(object, QPoint)
+    text_changed = pyqtSignal(object, str)
 
     def __init__(self, task_data: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.task_data = task_data
-        self.setFixedHeight(46)
+        self.setFixedHeight(68)
         self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._base_color = QColor("#FAEE69")
-        self._is_dragging = False
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(15)
 
-        # Check button
-        self.check_button = QPushButton("○", self)
-        self.check_button.setFixedSize(26, 26)
-        self.check_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.check_button.clicked.connect(lambda: self.completed.emit(self))
-        layout.addWidget(self.check_button)
+        # Editor (behave like regular view)
+        self.editor = StripeTextEdit(self)
+        self.editor.setText(task_data.get("text", ""))
+        self.editor.setReadOnly(False)
+        self.editor.setStyleSheet("background: transparent; border: none; font-size: 18px; font-weight: 600;")
+        self.editor.textChanged.connect(self._on_text_changed)
+        layout.addWidget(self.editor, 1)
+        self._drag_start_pos = QPoint()
 
-        # Content: Date + Text
-        self.content_layout = QVBoxLayout()
-        self.content_layout.setSpacing(0)
-        
-        self.date_label = QLabel(task_data.get("day", ""), self)
-        self.date_label.setStyleSheet("font-size: 9px; font-weight: 800; opacity: 0.7;")
-        self.content_layout.addWidget(self.date_label)
-
-        self.text_label = QLabel(task_data.get("text", ""), self)
-        self.text_label.setStyleSheet("font-size: 14px; font-weight: 600;")
-        self.content_layout.addWidget(self.text_label)
-        layout.addLayout(self.content_layout, 1)
-
-        # Stars
-        self.stars_layout = QHBoxLayout()
-        self.stars_layout.setSpacing(2)
-        self.star_buttons = []
-        for i in range(1, 4):
-            btn = QPushButton("★", self)
-            btn.setFixedSize(20, 20)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked=False, idx=i: self._set_priority(idx))
-            self.stars_layout.addWidget(btn)
-            self.star_buttons.append(btn)
-        layout.addLayout(self.stars_layout)
-
-        # Bump button
-        self.bump_button = QPushButton("→", self)
-        self.bump_button.setFixedSize(26, 26)
-        self.bump_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.bump_button.setToolTip("Move to tomorrow")
-        self.bump_button.clicked.connect(lambda: self.bumped.emit(self))
-        layout.addWidget(self.bump_button)
-
-        self._refresh_stars()
-
-    def _set_priority(self, p: int) -> None:
-        old_p = self.task_data.get("priority", 0)
-        if old_p == p:
-            self.task_data["priority"] = 0
-        else:
-            self.task_data["priority"] = p
-        self._refresh_stars()
-        self.priority_changed.emit(self)
-
-    def _refresh_stars(self) -> None:
-        p = self.task_data.get("priority", 0)
-        for i, btn in enumerate(self.star_buttons):
-            if (i + 1) <= p:
-                btn.setStyleSheet("color: #FFD700; background: transparent; border: none; font-size: 16px;")
-            else:
-                btn.setStyleSheet("color: rgba(255, 255, 255, 40); background: transparent; border: none; font-size: 16px;")
+    def _on_text_changed(self) -> None:
+        new_text = self.editor.toPlainText().strip()
+        self.task_data["text"] = new_text
+        self.text_changed.emit(self, new_text)
 
     def apply_theme(self, base_color: QColor) -> None:
         self._base_color = base_color
         text_color = get_contrast_color(base_color)
-        bg = lerp_color(base_color, QColor("#000000"), 0.05)
+        
+        # Consistent stripe background
+        if self.task_data.get("status") == "COMPLETED":
+            bg = QColor("#444444")
+            text_alpha = 140
+        else:
+            bg = lerp_color(base_color, QColor("#000000"), 0.05)
+            text_alpha = 255
+            
         self.setStyleSheet(
             f"FullTaskStripe {{ background-color: rgb({bg.red()}, {bg.green()}, {bg.blue()}); "
-            f"border-bottom: 1px solid rgba(255, 255, 255, 20); }}"
+            f"border-bottom: 1px solid rgba(255, 255, 255, 12); }}"
         )
-        self.text_label.setStyleSheet(f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()}); font-size: 14px; font-weight: 600;")
-        self.date_label.setStyleSheet(f"color: rgba({text_color.red()}, {text_color.green()}, {text_color.blue()}, 160); font-size: 9px; font-weight: 800;")
         
-        btn_style = (
-            "QPushButton {"
-            "background-color: rgba(0, 0, 0, 30);"
-            f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()});"
-            "border: 1px solid rgba(255, 255, 255, 30);"
-            "border-radius: 13px;"
-            "font-weight: 700;"
-            "}"
-            "QPushButton:hover { background-color: rgba(255, 255, 255, 40); }"
+        self.editor.setStyleSheet(
+            f"QTextEdit {{ background: transparent; border: none; "
+            f"color: rgba({text_color.red()}, {text_color.green()}, {text_color.blue()}, {text_alpha}); "
+            f"font-size: 18px; font-weight: 600; }}"
         )
-        self.check_button.setStyleSheet(btn_style)
-        self.bump_button.setStyleSheet(btn_style)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_started.emit(self, event.pos())
+            self._drag_start_pos = event.pos()
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            if (event.pos() - self._drag_start_pos).manhattanLength() > 8:
+                self.drag_started.emit(self, self._drag_start_pos)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if (event.pos() - self._drag_start_pos).manhattanLength() <= 8:
+                self.editor.setFocus()
+                cursor = self.editor.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+                self.editor.setTextCursor(cursor)
+        super().mouseReleaseEvent(event)
 
 
 class FullTaskOverlay(QWidget):
@@ -1007,12 +997,12 @@ class FullTaskOverlay(QWidget):
 
         # Header area
         self.header = QWidget(self)
-        self.header.setFixedHeight(60)
+        self.header.setFixedHeight(80)
         h_layout = QVBoxLayout(self.header)
-        h_layout.setContentsMargins(0, 20, 0, 0)
-        self.title_label = QLabel("Outstanding Tasks", self.header)
+        h_layout.setContentsMargins(30, 35, 30, 0)
+        self.title_label = QLabel("Full Task List", self.header)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 24px; font-weight: 800;")
+        self.title_label.setStyleSheet("font-size: 20px; font-weight: 800;")
         h_layout.addWidget(self.title_label)
         self.layout.addWidget(self.header)
 
@@ -1021,15 +1011,30 @@ class FullTaskOverlay(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("background: transparent; border: none;")
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(0, 0, 0, 50);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
         
-        # Enable touch-style kinetic scrolling
-        QScroller.grabGesture(self.scroll.viewport(), QScroller.ScrollerGesture.LeftMouseButtonGesture)
+        # Disable QScroller as it interferes with drag-and-drop reordering
+        # QScroller.grabGesture(self.scroll.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
         
         self.container = QWidget()
         self.container.setStyleSheet("background: transparent;")
-        # We'll use manual positioning for animations, so no layout on container
         
         self.scroll.setWidget(self.container)
         self.layout.addWidget(self.scroll)
@@ -1044,23 +1049,24 @@ class FullTaskOverlay(QWidget):
         bg = lerp_color(base_color, QColor("#000000"), 0.1)
         self.setStyleSheet(f"background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, 245);")
         text_color = get_contrast_color(base_color)
-        self.title_label.setStyleSheet(f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()}); font-size: 24px; font-weight: 800;")
+        self.title_label.setStyleSheet(f"color: rgb({text_color.red()}, {text_color.green()}, {text_color.blue()}); font-size: 20px; font-weight: 800;")
         for item in self.items:
             item.apply_theme(base_color)
 
-    def refresh_tasks(self) -> None:
-        # Clear existing
-        for item in self.items:
-            item.setParent(None)
-            item.deleteLater()
+    def refresh_tasks(self, animated: bool = False) -> None:
+        # Aggressively clear ALL child widgets from container to prevent "ghost" background tasks
+        for child in self.container.findChildren(QWidget):
+            if child.parent() == self.container:
+                child.setParent(None)
+                child.deleteLater()
         self.items.clear()
         
-        # Load from DB
-        # Order: priority DESC, sort_index ASC, created_at ASC
+        # Select only ACTIVE tasks that are NOT empty
         rows = self.owner.db.execute(
             "SELECT day, task_id, status, text, completion_rank, priority, created_at, sort_index "
-            "FROM tasks WHERE status = 'ACTIVE' "
-            "ORDER BY priority DESC, sort_index ASC, created_at ASC"
+            "FROM tasks "
+            "WHERE status = 'ACTIVE' AND text IS NOT NULL AND TRIM(text) != '' "
+            "ORDER BY priority DESC, sort_index ASC"
         ).fetchall()
         
         for row in rows:
@@ -1069,86 +1075,73 @@ class FullTaskOverlay(QWidget):
                 "text": row[3], "completion_rank": row[4],
                 "priority": row[5], "created_at": row[6], "sort_index": row[7]
             }
+            
             item = FullTaskStripe(data, self.container)
-            item.completed.connect(self._on_item_completed)
-            item.bumped.connect(self._on_item_bumped)
-            item.priority_changed.connect(self._on_item_priority_changed)
+            item.text_changed.connect(self._on_item_text_changed)
             item.drag_started.connect(self._on_drag_started)
             item.apply_theme(self.owner.button_color)
             item.setParent(self.container)
+            item.show()
             self.items.append(item)
         
-        self._update_item_positions(animated=False)
+        self._update_item_positions(animated=animated)
+
+    def _on_item_text_changed(self, item: FullTaskStripe, text: str) -> None:
+        d = item.task_data
+        self.owner.db.execute(
+            "UPDATE tasks SET text = ? WHERE day = ? AND task_id = ?",
+            (text, d["day"], d["task_id"])
+        )
+        self.owner.db.commit()
+        self.owner._full_tasks_dirty = True
 
     def _update_item_positions(self, animated: bool = True) -> None:
-        margin = 10
-        spacing = 4
-        y = margin
-        for i, item in enumerate(self.items):
-            if item == self._dragging_item:
-                continue
+        margin_x = 0
+        margin_y = 10
+        spacing = 0
+        stripe_h = 68
+        
+        others = [it for it in self.items if it != self._dragging_item]
+        
+        y_max = margin_y
+        for idx, item in enumerate(others):
+            slot = idx
+            if self._dragging_item and slot >= self._placeholder_index:
+                slot += 1
             
-            target_idx = i
-            if self._dragging_item and i >= self._placeholder_index:
-                target_idx = i + 1
-            
-            target_y = margin + target_idx * (item.height() + spacing)
+            target_y = margin_y + slot * (stripe_h + spacing)
             
             if animated:
                 if not hasattr(item, "_pos_anim"):
                     item._pos_anim = QPropertyAnimation(item, b"pos")
                 
-                if item._pos_anim.endValue() != QPoint(20, target_y):
+                if item._pos_anim.endValue() != QPoint(margin_x, target_y):
                     item._pos_anim.stop()
-                    item._pos_anim.setDuration(200)
+                    item._pos_anim.setDuration(220)
                     item._pos_anim.setStartValue(item.pos())
-                    item._pos_anim.setEndValue(QPoint(20, target_y))
+                    item._pos_anim.setEndValue(QPoint(margin_x, target_y))
                     item._pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
                     item._pos_anim.start()
             else:
                 if hasattr(item, "_pos_anim"):
                     item._pos_anim.stop()
-                item.move(20, target_y)
-            y = target_y + item.height() + spacing
-        
-        self.container.setMinimumSize(self.width(), y + 60)
+                item.move(margin_x, target_y)
+            
+            item.setFixedWidth(self.width())
+            y_max = max(y_max, target_y + stripe_h)
 
-    def _on_item_completed(self, item: FullTaskStripe) -> None:
-        d = item.task_data
-        self.owner.db.execute(
-            "UPDATE tasks SET status = 'COMPLETED', completion_rank = ? WHERE day = ? AND task_id = ?",
-            (int(time.time()), d["day"], d["task_id"])
-        )
-        self.owner.db.commit()
-        self.owner._full_tasks_dirty = True
-        self.refresh_tasks()
-
-    def _on_item_bumped(self, item: FullTaskStripe) -> None:
-        d = item.task_data
-        curr_date = date.fromisoformat(d["day"])
-        next_date = curr_date + timedelta(days=1)
-        next_day_str = next_date.isoformat()
+        # Ensure container is big enough for regular items + the potential placeholder spot
+        total_content_h = margin_y + len(self.items) * (stripe_h + spacing)
         
-        # Find new task_id for that day
-        res = self.owner.db.execute("SELECT MAX(task_id) FROM tasks WHERE day = ?", (next_day_str,)).fetchone()
-        new_id = (res[0] or 0) + 1
-        
-        self.owner.db.execute(
-            "UPDATE tasks SET day = ?, task_id = ? WHERE day = ? AND task_id = ?",
-            (next_day_str, new_id, d["day"], d["task_id"])
-        )
-        self.owner.db.commit()
-        self.owner._full_tasks_dirty = True
-        self.refresh_tasks()
+        # account for the current visual position of the dragging item
+        if self._dragging_item is not None:
+            total_content_h = max(total_content_h, self._dragging_item.y() + stripe_h)
 
-    def _on_item_priority_changed(self, item: FullTaskStripe) -> None:
-        d = item.task_data
-        self.owner.db.execute(
-            "UPDATE tasks SET priority = ? WHERE day = ? AND task_id = ?",
-            (d["priority"], d["day"], d["task_id"])
-        )
-        self.owner.db.commit()
-        self.refresh_tasks() # Re-sort
+        container_w = max(300, self.width())
+        self.container.setMinimumSize(container_w, total_content_h + 100)
+        self.container.resize(container_w, total_content_h + 100)
+
+    # Removed obsolete completion/bump/priority handlers as per user request.
 
     def _on_drag_started(self, item: FullTaskStripe, local_pos: QPoint) -> None:
         self._dragging_item = item
@@ -1157,33 +1150,51 @@ class FullTaskOverlay(QWidget):
         self._placeholder_index = self.items.index(item)
         item.raise_()
         item.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.grabMouse() # Ensure we track everything during the drag
 
     def mouseMoveEvent(self, event) -> None:
-        if self._dragging_item:
+        if self._dragging_item is not None:
             # Move visually
             container_pos = self.container.mapFrom(self, event.pos())
             target_y = container_pos.y() - self._drag_start_pos.y()
-            self._dragging_item.move(self._drag_initial_rect.x(), target_y)
+            target_y = max(0, target_y) # Prevent dragging out the top
+            self._dragging_item.move(0, target_y)
             
+            # Auto-scroll logic
+            view_h = self.scroll.viewport().height()
+            scroll_bar = self.scroll.verticalScrollBar()
+            mouse_y_in_view = self.scroll.viewport().mapFrom(self, event.pos()).y()
+            
+            if mouse_y_in_view < 50:
+                scroll_bar.setValue(scroll_bar.value() - 10)
+            elif mouse_y_in_view > view_h - 50:
+                scroll_bar.setValue(scroll_bar.value() + 10)
+
             # Find new placeholder index
-            new_idx = -1
-            mid_y = target_y + self._dragging_item.height() // 2
-            for i, other in enumerate(self.items):
-                if other == self._dragging_item: continue
-                other_mid = other.y() + other.height() // 2
-                if mid_y < other_mid:
-                    new_idx = i
+            stripe_h = 68
+            others = [it for it in self.items if it != self._dragging_item]
+            mid_y = target_y + stripe_h // 2
+            
+            new_idx = 0
+            for i, other in enumerate(others):
+                other_mid = other.y() + stripe_h // 2
+                if mid_y > other_mid:
+                    new_idx = i + 1
+                else:
                     break
-            if new_idx == -1:
-                new_idx = len(self.items) - 1
             
             if new_idx != self._placeholder_index:
                 self._placeholder_index = new_idx
                 self._reorder_visuals()
+            else:
+                # Still need to update container size if dragging item moved further
+                self._update_item_positions(animated=False)
+                
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if self._dragging_item:
+        if self._dragging_item is not None:
+            self.releaseMouse()
             self._dragging_item.setCursor(Qt.CursorShape.PointingHandCursor)
             self._finalize_reorder()
             self._dragging_item = None
@@ -1199,22 +1210,36 @@ class FullTaskOverlay(QWidget):
         if old_idx == new_idx:
             self.refresh_tasks()
             return
-            
+
         item = self.items.pop(old_idx)
         self.items.insert(new_idx, item)
-        
-        # Update sort_index for all items in the same priority group
-        # Actually simplest: update all sort_index for all ACTIVE tasks in this priority
-        p = item.task_data["priority"]
-        affected = [x for x in self.items if x.task_data["priority"] == p]
-        for i, itm in enumerate(affected):
-            itm.task_data["sort_index"] = i
+
+        # Update sort_index in DB for all items in the list
+        for i, itm in enumerate(self.items):
+            d = itm.task_data
             self.owner.db.execute(
                 "UPDATE tasks SET sort_index = ? WHERE day = ? AND task_id = ?",
-                (i, itm.task_data["day"], itm.task_data["task_id"])
+                (i, d["day"], d["task_id"])
             )
         self.owner.db.commit()
         self.refresh_tasks()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Clicking the header area allows window dragging
+            if event.pos().y() < 60:
+                event.ignore()
+                return
+            # Clicking the list area consumes the event to prevent window dragging
+            event.accept()
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        # Pass wheel events to the scroll area
+        self.scroll.verticalScrollBar().setValue(
+            self.scroll.verticalScrollBar().value() - event.angleDelta().y() // 2
+        )
+        event.accept()
 
 
 class LemonDoWidget(QWidget):
@@ -1323,6 +1348,10 @@ class LemonDoWidget(QWidget):
         self._pending_deletes: list[tuple[float, TaskStripe]] = []
         self._pending_adds: list[tuple[float, TaskStripe]] = []
         self._pending_completions: list[tuple[float, TaskStripe]] = []
+        self._dragging_stripe: TaskStripe | None = None
+        self._drag_start_pos = QPoint()
+        self._drag_initial_rect = QRect()
+        self._placeholder_index = -1
         self._delete_queue_timer = QTimer(self)
         self._delete_queue_timer.setSingleShot(True)
         self._delete_queue_timer.timeout.connect(self._process_delete_queue)
@@ -1554,7 +1583,7 @@ class LemonDoWidget(QWidget):
         except sqlite3.OperationalError:
             pass
         try:
-            self.db.execute("ALTER TABLE tasks ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            self.db.execute("ALTER TABLE tasks ADD COLUMN created_at TIMESTAMP DEFAULT '2026-01-01 00:00:00'")
         except sqlite3.OperationalError:
             pass
         try:
@@ -1809,6 +1838,9 @@ class LemonDoWidget(QWidget):
                     event.accept()
                     return True
             if event.key() == Qt.Key.Key_F:
+                f_widget = QApplication.focusWidget()
+                if isinstance(f_widget, (QTextEdit, StripeTextEdit)):
+                    return False
                 self._toggle_overlay_mode("full_tasks")
                 event.accept()
                 return True
@@ -1944,7 +1976,7 @@ class LemonDoWidget(QWidget):
         current_bottom = 0
         for stripe in self.buttons:
             try:
-                if stripe.is_deleting:
+                if stripe.is_deleting or stripe == getattr(self, "_dragging_stripe", None):
                     continue
                 rect = stripe.geometry()
                 current_bottom = max(current_bottom, rect.y() + rect.height())
@@ -2209,6 +2241,14 @@ class LemonDoWidget(QWidget):
         if mode is None:
             if self._overlay_anim and self._overlay_anim.state() == QAbstractAnimation.State.Running:
                 self._overlay_anim.stop()
+            
+            # Untoggle logic for both info and full task overlays
+            if not self.info_overlay.isVisible() and not self.full_task_overlay.isVisible():
+                return
+                
+            if self.full_task_overlay.isVisible():
+                self.full_task_overlay.hide()
+                
             if not self.info_overlay.isVisible():
                 return
             if not animated:
@@ -2569,6 +2609,8 @@ class LemonDoWidget(QWidget):
         if hasattr(self, "info_overlay"):
             self.info_overlay.setGeometry(self.rect())
             self._position_birds_eye_grid()
+        if hasattr(self, "full_task_overlay"):
+            self.full_task_overlay.setGeometry(self.rect())
         if hasattr(self, "particle_overlay"):
             self.particle_overlay.setGeometry(self.rect())
             self.particle_overlay.raise_()
@@ -2640,6 +2682,7 @@ class LemonDoWidget(QWidget):
         stripe.delete_requested.connect(self.on_delete_requested)
         stripe.long_pressed.connect(self.on_task_long_pressed)
         stripe.focus_complete_requested.connect(self.on_focus_complete_requested)
+        stripe.drag_started.connect(self.on_stripe_drag_started)
         stripe.apply_theme(self.button_color)
         stripe.show()
         self.buttons.append(stripe)
@@ -3091,6 +3134,7 @@ class LemonDoWidget(QWidget):
         completed = [b for b in self.buttons if b.state == TaskStripe.COMPLETED and not b.is_deleting]
         completed.sort(key=lambda b: b.completion_rank if b.completion_rank is not None else 10**9)
         active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+        
         wrapper_top_in_window = self.stripe_wrapper.mapTo(self, QPoint(0, 0)).y()
         completed_anchor_y = max(0, int(self.height() * 0.25) - wrapper_top_in_window)
         active_anchor_y = max(0, int(self.height() * 0.40) - wrapper_top_in_window)
@@ -3105,40 +3149,45 @@ class LemonDoWidget(QWidget):
 
         if active:
             active_total_height = sum(s.height() for s in active) + self.stripe_gap * max(0, len(active) - 1)
-            # Let active stack breathe around the 40% anchor by shifting some height upward.
             proposed_top = max(0, active_anchor_y - int(active_total_height * 0.35))
         else:
             active_total_height = 0
             proposed_top = active_anchor_y
+            
         if completed:
-            # Floating buffer: active zone must remain exactly 150px below completed stack bottom.
             active_start_y = max(0, completed_bottom + 150)
         else:
             active_start_y = proposed_top
-        placeholder_active_bottom = active_start_y + 72 if (completed and not active) else 0
-        current_y = active_start_y
-        for idx, stripe in enumerate(active):
-            if idx > 0:
-                current_y += active[idx - 1].height() + self.stripe_gap
-            targets[stripe] = QRect(0, current_y, wrapper_width, stripe.height())
+            
+        # Prepare Active Positions
+        y = active_start_y
+        active_positioning = [s for s in active if s != self._dragging_stripe]
+        
+        # Calculate positions with a gap for the dragging item's placeholder
+        for idx in range(len(active_positioning) + (1 if self._dragging_stripe else 0)):
+            if self._dragging_stripe and idx == self._placeholder_index:
+                y += self._dragging_stripe.height() + self.stripe_gap
+                continue
+            
+            # Use original item index from active_positioning
+            item_idx = idx if (not self._dragging_stripe or idx < self._placeholder_index) else idx - 1
+            if item_idx < len(active_positioning):
+                stripe = active_positioning[item_idx]
+                targets[stripe] = QRect(0, y, wrapper_width, stripe.height())
+                y += stripe.height() + self.stripe_gap
 
+        placeholder_active_bottom = y
         show_add = False
         add_target: QRect | None = None
-        if active and show_add:
-            last_active = active[-1]
-            last_rect = QRect(0, current_y, wrapper_width, last_active.height())
-            add_y = last_rect.y() + last_rect.height() + self.add_button_gap
-        elif completed and show_add:
-            add_y = max(completed_bottom + 150, active_anchor_y) + self.add_button_gap
-        else:
-            add_y = active_anchor_y + self.add_button_gap
+        add_y = (placeholder_active_bottom if active else active_anchor_y) + self.add_button_gap 
+        
         add_x = max(0, (wrapper_width - self.add_task_button.width()) // 2)
         if show_add:
             add_target = QRect(add_x, add_y, self.add_task_button.width(), self.add_task_button.height())
+            
         wrapper_height = max(
             completed_bottom + 4 if completed else 4,
-            placeholder_active_bottom + 4 if placeholder_active_bottom else 4,
-            current_y + active[-1].height() + 4 if active else 4,
+            placeholder_active_bottom + 4,
             add_y + self.add_task_button.height() + 4 if show_add else 4,
         )
         return targets, add_target, wrapper_height, show_add
@@ -3408,7 +3457,7 @@ class LemonDoWidget(QWidget):
         self._save_current_day()
 
     def _resize_window_to_fit(self, animated: bool) -> None:
-        if self.is_hibernated:
+        if self.is_hibernated or (hasattr(self, "full_task_overlay") and self.full_task_overlay.isVisible()):
             return
         self.layout().activate()
         target_h = max(820, self.layout().sizeHint().height())
@@ -3453,12 +3502,31 @@ class LemonDoWidget(QWidget):
         self.debug_label.setVisible(self.debug_visible)
         self.debug_label.raise_()
 
+    def on_stripe_drag_started(self, stripe: TaskStripe, pos: QPoint) -> None:
+        if stripe.state == TaskStripe.COMPLETED:
+            return
+        self._dragging_stripe = stripe
+        self._drag_start_pos = pos
+        self._drag_initial_rect = stripe.geometry()
+        
+        # Determine initial placeholder index among ACTIVE tasks
+        active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+        if stripe in active:
+            self._placeholder_index = active.index(stripe)
+        
+        stripe.raise_()
+        self.grabMouse()
+
     def mousePressEvent(self, event) -> None:
         self._reset_idle_timer()
         if self.is_hibernated and event.button() == Qt.MouseButton.LeftButton:
             self.exit_hibernate()
             event.accept()
             return
+
+        # Only allow window drag if we clicked on the background OR if no child handled it
+        # Actually, since child widgets now accept their own clicks, this will only fire
+        # if the user clicks the empty padding.
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -3468,6 +3536,40 @@ class LemonDoWidget(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         self._reset_idle_timer()
+        
+        if self._dragging_stripe:
+            # Handle stripe reordering
+            wrapper_pos = self.stripe_wrapper.mapFrom(self, event.pos())
+            target_y = wrapper_pos.y() - self._drag_start_pos.y()
+            max_y = max(0, self.stripe_wrapper.height() - self._dragging_stripe.height())
+            target_y = max(0, min(target_y, max_y))
+            
+            self._dragging_stripe.move(0, target_y)
+            
+            # Find new placeholder index among ACTIVE tasks
+            active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+            others = [s for s in active if s != self._dragging_stripe]
+            
+            mid_y = target_y + self._dragging_stripe.height() // 2
+            new_idx = -1
+            
+            # We need to know where active tasks start in wrapper
+            # Simplest: check against current geometries of 'others'
+            for i, other in enumerate(others):
+                other_mid = other.y() + other.height() // 2
+                if mid_y < other_mid:
+                    new_idx = i
+                    break
+            if new_idx == -1:
+                new_idx = len(others)
+                
+            if new_idx != self._placeholder_index:
+                self._placeholder_index = new_idx
+                self.relayout_stripes(animated=True)
+            
+            event.accept()
+            return
+
         if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
@@ -3475,6 +3577,37 @@ class LemonDoWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._dragging_stripe:
+            self.releaseMouse()
+            
+            # Finalize order
+            active = [b for b in self.buttons if b.state != TaskStripe.COMPLETED and not b.is_deleting]
+            old_idx = active.index(self._dragging_stripe)
+            
+            if old_idx != self._placeholder_index:
+                # Move in self.buttons
+                global_old_idx = self.buttons.index(self._dragging_stripe)
+                item = self.buttons.pop(global_old_idx)
+                
+                # Find the global insertion point
+                # It's after all preceding active tasks
+                others = [s for s in active if s != self._dragging_stripe]
+                if self._placeholder_index < len(others):
+                    target_neighbor = others[self._placeholder_index]
+                    global_new_idx = self.buttons.index(target_neighbor)
+                else:
+                    # Insert after the last active task
+                    global_new_idx = self.buttons.index(others[-1]) + 1 if others else 0
+                
+                self.buttons.insert(global_new_idx, item)
+                self._save_current_day()
+            
+            self._dragging_stripe = None
+            self._placeholder_index = -1
+            self.relayout_stripes(animated=True)
+            event.accept()
+            return
+
         self._drag_offset = None
         super().mouseReleaseEvent(event)
 

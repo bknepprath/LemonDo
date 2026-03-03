@@ -4,3 +4,13 @@ __pycache__/
 *.db-shm
 *.db-wal
 .cursor/
+
+# Debug and Test scripts
+check_*.py
+list_*.py
+test_*.py
+try_*.py
+crash_catcher.py
+
+# Logs
+*.log
