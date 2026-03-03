@@ -1,6 +1,6 @@
 # Lemon Do PRD (Current Build)
 
-Last updated: 2026-03-03 00:54:00 (Antigravity Maintenance)
+Last updated: 2026-03-03 01:10:00 (Settings & Palettes Update)
 
 ## Product Goal
 
@@ -55,6 +55,20 @@ Lemon Do is a compact always-on-top PyQt6 task widget for daily execution with:
 - `S`: Stats
 - `B`: Bird's Eye yearly grid
 - `Q`: Return to today/default view
+- `G`: Settings
+
+### Settings Overlay
+- Accessed via `G`.
+- **Debug Mode Toggle**:
+  - Toggles time spoofing (`Up`/`Down`) and data nuking (`N`).
+  - If OFF, these hotkeys are disabled.
+- **Palette Swap**:
+  - Choice of color themes:
+    - **Lemon**: Default yellow/orange/blue.
+    - **Mint**: Fresh green/teal tones.
+    - **Maroon**: Deep red/brown tones.
+    - **Grayscale**: Modern monochromatic tones.
+  - Settings are persisted across app restarts.
 
 Bird's Eye specifics:
 - 365-day grid.
@@ -71,10 +85,10 @@ Bird's Eye specifics:
 - `C`: Clock overlay
 - `S`: Stats overlay
 - `Q`: return to today/default task view
-- `Up` / `Down`: debug time offset (+/-10m)
-- `R`: reset debug time offset
+- `G`: Settings overlay
 - `H`: toggle debug time chip
-- `N`: nuke all task data
+- `N`: nuke all task data (active only in Debug Mode)
+- `Up` / `Down`: debug time offset (active only in Debug Mode)
 - `Esc`: close app
 
 ## Explicitly Removed/Deprecated

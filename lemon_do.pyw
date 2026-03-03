@@ -892,6 +892,33 @@ class LemonDoWidget(QWidget):
     EVENING_BUTTON = QColor("#FCFCDE")      # Cream
     SLEEP_BG = QColor("#000000")
 
+    PALETTES = {
+        "yellow": {
+            "MORNING_BG": "#FAEE69", "MORNING_BUTTON": "#1A237E",
+            "AFTERNOON_BG": "#FF9933", "AFTERNOON_BUTTON": "#0D47A1",
+            "FLIP_BG": "#3C98E8", "FLIP_BUTTON": "#FF9933",
+            "EVENING_BG": "#442F72", "EVENING_BUTTON": "#FCFCDE"
+        },
+        "mint": {
+            "MORNING_BG": "#B2FFD1", "MORNING_BUTTON": "#004D40",
+            "AFTERNOON_BG": "#4DB6AC", "AFTERNOON_BUTTON": "#00695C",
+            "FLIP_BG": "#80CBC4", "FLIP_BUTTON": "#004D40",
+            "EVENING_BG": "#002B24", "EVENING_BUTTON": "#E0F2F1"
+        },
+        "maroon": {
+            "MORNING_BG": "#E57373", "MORNING_BUTTON": "#4A148C",
+            "AFTERNOON_BG": "#800000", "AFTERNOON_BUTTON": "#3E2723",
+            "FLIP_BG": "#A52A2A", "FLIP_BUTTON": "#FDD835",
+            "EVENING_BG": "#3E2723", "EVENING_BUTTON": "#FFEBEE"
+        },
+        "grayscale": {
+            "MORNING_BG": "#E0E0E0", "MORNING_BUTTON": "#424242",
+            "AFTERNOON_BG": "#9E9E9E", "AFTERNOON_BUTTON": "#212121",
+            "FLIP_BG": "#BDBDBD", "FLIP_BUTTON": "#212121",
+            "EVENING_BG": "#212121", "EVENING_BUTTON": "#F5F5F5"
+        }
+    }
+
     def __init__(self, title_font_family: str | None = None) -> None:
         super().__init__()
         self.data_path = Path(__file__).resolve().parent / "lemon_do_history.db"
@@ -911,6 +938,10 @@ class LemonDoWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
         self.setWindowIcon(build_lemon_icon())
+
+        # Settings
+        self.debug_mode_enabled = False
+        self.current_palette = "yellow"
 
         self.background_color = self.MORNING_BG
         self.button_color = self.MORNING_BUTTON
@@ -1188,10 +1219,14 @@ class LemonDoWidget(QWidget):
                 values[key] = 0
             else:
                 values[key] = int(row[0])
-        self.stat_clicks = values["lifetime_clicks"]
-        self.stat_tasks_created = values["lifetime_tasks_created"]
-        self.stat_tasks_deleted = values["lifetime_tasks_deleted"]
         self.stat_tasks_completed = values["lifetime_tasks_completed"]
+
+        # Load Settings from DB
+        debug_row = self.db.execute("SELECT value FROM app_stats WHERE key = 'settings_debug_mode'").fetchone()
+        self.debug_mode_enabled = bool(debug_row[0]) if debug_row else False
+
+        palette_row = self.db.execute("SELECT value_str FROM app_stats WHERE key = 'settings_palette'").fetchone()
+        self.current_palette = str(palette_row[0]) if palette_row and palette_row[0] else "yellow"
 
     def _save_lifetime_stats(self) -> None:
         if not self._lifetime_stats_dirty:
@@ -1206,11 +1241,35 @@ class LemonDoWidget(QWidget):
             for key, value in rows:
                 self.db.execute(
                     """
-                    INSERT INTO app_stats(key, value) VALUES(?, ?)
+                    VALUES(?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
                     (key, value),
                 )
+            self.db.execute(
+                """
+                INSERT INTO app_stats(key, value) VALUES('settings_debug_mode', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (int(self.debug_mode_enabled),),
+            )
+            self.db.execute(
+                "ALTER TABLE app_stats ADD COLUMN value_str TEXT"
+            ) if self.db.execute("PRAGMA table_info(app_stats)").fetchone() and "value_str" not in [x[1] for x in self.db.execute("PRAGMA table_info(app_stats)").fetchall()] else None
+            
+            # Simplified approach for schema change: check if column exists
+            try:
+                self.db.execute("ALTER TABLE app_stats ADD COLUMN value_str TEXT")
+            except sqlite3.OperationalError:
+                pass # Already exists
+                
+            self.db.execute(
+                """
+                INSERT INTO app_stats(key, value_str) VALUES('settings_palette', ?)
+                ON CONFLICT(key) DO UPDATE SET value_str = excluded.value_str
+                """,
+                (self.current_palette,),
+            )
         self._lifetime_stats_dirty = False
 
     def _best_completed_day_count(self) -> int:
@@ -1380,13 +1439,15 @@ class LemonDoWidget(QWidget):
                 event.accept()
                 return True
             if event.key() == Qt.Key.Key_Up:
-                self.time_offset += timedelta(minutes=10)
-                self.update_color_state()
+                if self.debug_mode_enabled:
+                    self.time_offset += timedelta(minutes=10)
+                    self.update_color_state()
                 event.accept()
                 return True
             if event.key() == Qt.Key.Key_Down:
-                self.time_offset -= timedelta(minutes=10)
-                self.update_color_state()
+                if self.debug_mode_enabled:
+                    self.time_offset -= timedelta(minutes=10)
+                    self.update_color_state()
                 event.accept()
                 return True
             if event.key() == Qt.Key.Key_Tab:
@@ -1696,10 +1757,11 @@ class LemonDoWidget(QWidget):
             "Space - Toggle this hotkey menu\n"
             "C - Open/close clock view\n"
             "S - Open/close stats view\n"
+            "G - Open/close settings\n"
             "H - Toggle debug time label\n"
-            "Up/Down - Time travel debug\n"
+            "Up/Down - Time travel debug (Debug Mode)\n"
             "R - Reset spoofed time\n"
-            "N - Nuke all task data"
+            "N - Nuke all task data (Debug Mode)"
         )
 
     def _year_completed_days(self, year: int) -> set[date]:
@@ -1747,6 +1809,27 @@ class LemonDoWidget(QWidget):
         now = self.get_app_time()
         hour12 = now.hour % 12 or 12
         return f"{hour12} {now.minute:02d} {now.second:02d}"
+
+    def _settings_overlay_text(self) -> str:
+        debug_status = "ON" if self.debug_mode_enabled else "OFF"
+        palette_names = {
+            "yellow": "1: Lemon (Yellow)",
+            "mint": "2: Mint (Green)",
+            "maroon": "3: Maroon (Red)",
+            "grayscale": "4: Grayscale"
+        }
+        palette_list = "\n".join([f"{'→ ' if self.current_palette == k else '  '}{v}" for k, v in palette_names.items()])
+        
+        return (
+            f"<b>Debug Mode: {debug_status}</b>\n"
+            "Press [D] to toggle\n"
+            "(Enables Nuke and Time Travel)\n"
+            "\n"
+            "<b>Palette Swap</b>\n"
+            f"{palette_list}\n"
+            "\n"
+            "Press [Esc] or [G] to close"
+        )
 
     def _clock_overlay_font(self) -> QFont:
         preferred_family = self.title_font_family or self.font().family()
@@ -1823,6 +1906,15 @@ class LemonDoWidget(QWidget):
             self.day_label.hide()
             year = self.get_app_time().date().year
             self.birds_eye_grid.set_data(year, self._year_completed_days(year))
+        elif mode == "settings":
+            self.info_overlay_title.show()
+            self.birds_eye_grid.hide()
+            self.info_overlay_body.show()
+            self.day_label.hide()
+            self.info_overlay_title.setText("Settings")
+            self.info_overlay_title.setFont(QFont(self.title_font_family or self.font().family(), 30))
+            self.info_overlay_body.setFont(QFont(self.font().family(), 13))
+            self.info_overlay_body.setText(self._settings_overlay_text())
         else:
             return
         self.info_overlay.raise_()
@@ -1859,6 +1951,8 @@ class LemonDoWidget(QWidget):
         elif self._overlay_mode == "birds":
             year = self.get_app_time().date().year
             self.birds_eye_grid.set_data(year, self._year_completed_days(year))
+        elif self._overlay_mode == "settings":
+            self.info_overlay_body.setText(self._settings_overlay_text())
 
     def on_birds_eye_day_hovered(self, day_value: date | None) -> None:
         if self._overlay_mode != "birds":
@@ -3075,6 +3169,47 @@ class LemonDoWidget(QWidget):
             event.accept()
             return
         key = event.key()
+        if self._overlay_mode == "settings":
+            if key == Qt.Key.Key_D:
+                self.debug_mode_enabled = not self.debug_mode_enabled
+                self._lifetime_stats_dirty = True
+                self._save_lifetime_stats()
+                self.info_overlay_body.setText(self._settings_overlay_text())
+                event.accept()
+                return
+            elif key == Qt.Key.Key_1:
+                self.current_palette = "yellow"
+                self._lifetime_stats_dirty = True
+                self._save_lifetime_stats()
+                self.update_color_state()
+                self.info_overlay_body.setText(self._settings_overlay_text())
+                event.accept()
+                return
+            elif key == Qt.Key.Key_2:
+                self.current_palette = "mint"
+                self._lifetime_stats_dirty = True
+                self._save_lifetime_stats()
+                self.update_color_state()
+                self.info_overlay_body.setText(self._settings_overlay_text())
+                event.accept()
+                return
+            elif key == Qt.Key.Key_3:
+                self.current_palette = "maroon"
+                self._lifetime_stats_dirty = True
+                self._save_lifetime_stats()
+                self.update_color_state()
+                self.info_overlay_body.setText(self._settings_overlay_text())
+                event.accept()
+                return
+            elif key == Qt.Key.Key_4:
+                self.current_palette = "grayscale"
+                self._lifetime_stats_dirty = True
+                self._save_lifetime_stats()
+                self.update_color_state()
+                self.info_overlay_body.setText(self._settings_overlay_text())
+                event.accept()
+                return
+
         if key == Qt.Key.Key_Space:
             self._toggle_overlay_mode("hotkeys")
             event.accept()
@@ -3107,10 +3242,22 @@ class LemonDoWidget(QWidget):
             self.navigate_days(-1)
             event.accept()
             return
+        elif key == Qt.Key.Key_G:
+            self._toggle_overlay_mode("settings")
+            event.accept()
+            return
         elif key == Qt.Key.Key_Up:
-            self.time_offset += timedelta(minutes=10)
+            if self.debug_mode_enabled:
+                self.time_offset += timedelta(minutes=10)
+                self.update_color_state()
+            event.accept()
+            return
         elif key == Qt.Key.Key_Down:
-            self.time_offset -= timedelta(minutes=10)
+            if self.debug_mode_enabled:
+                self.time_offset -= timedelta(minutes=10)
+                self.update_color_state()
+            event.accept()
+            return
         elif key == Qt.Key.Key_R:
             self.time_offset = timedelta(0)
         elif key == Qt.Key.Key_H:
@@ -3119,7 +3266,8 @@ class LemonDoWidget(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_N:
-            self.nuke_all_task_data()
+            if self.debug_mode_enabled:
+                self.nuke_all_task_data()
             event.accept()
             return
         elif key == Qt.Key.Key_Escape:
@@ -3181,17 +3329,28 @@ class LemonDoWidget(QWidget):
         self.update()
 
     def _compute_target_state(self, minute: int) -> tuple[QColor, QColor, bool, QColor, int]:
+        palette = self.PALETTES.get(self.current_palette, self.PALETTES["yellow"])
+        
+        morning_bg = QColor(palette["MORNING_BG"])
+        morning_button = QColor(palette["MORNING_BUTTON"])
+        afternoon_bg = QColor(palette["AFTERNOON_BG"])
+        afternoon_button = QColor(palette["AFTERNOON_BUTTON"])
+        flip_bg = QColor(palette["FLIP_BG"])
+        flip_button = QColor(palette["FLIP_BUTTON"])
+        evening_bg = QColor(palette["EVENING_BG"])
+        evening_button = QColor(palette["EVENING_BUTTON"])
+
         if minute >= 1320 or minute < 240:
             bg = QColor(self.SLEEP_BG)
-            button = QColor(self.EVENING_BUTTON)
+            button = evening_button
             text = QColor("#FFFFFF")
             return bg, button, True, text, 0
 
         keyframes: list[tuple[int, QColor, QColor]] = [
-            (240, self.MORNING_BG, self.MORNING_BUTTON),     # 04:00
-            (959, self.AFTERNOON_BG, self.AFTERNOON_BUTTON), # 15:59
-            (960, self.FLIP_BG, self.FLIP_BUTTON),           # 16:00
-            (1319, self.EVENING_BG, self.EVENING_BUTTON),    # 21:59
+            (240, morning_bg, morning_button),     # 04:00
+            (959, afternoon_bg, afternoon_button), # 15:59
+            (960, flip_bg, flip_button),           # 16:00
+            (1319, evening_bg, evening_button),    # 21:59
         ]
         start_min, start_bg, start_button = keyframes[0]
         end_min, end_bg, end_button = keyframes[-1]

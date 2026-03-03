@@ -1,6 +1,6 @@
 # Lemon Do Architecture (Agent-Oriented)
 
-Last updated: 2026-03-03 00:54:00 (Antigravity Maintenance)
+Last updated: 2026-03-03 01:12:00 (Settings Architecture Update)
 
 ## Entry Point
 
@@ -35,7 +35,9 @@ Last updated: 2026-03-03 00:54:00 (Antigravity Maintenance)
 - `is_hibernated`
 - `_completion_in_progress`
 - `_delete_in_progress`
-- `_overlay_mode` (`hotkeys`, `clock`, `stats`, `birds`, `None`)
+- `_overlay_mode` (`hotkeys`, `clock`, `stats`, `birds`, `settings`, `None`)
+- `debug_mode_enabled` (bool, persists to `app_stats`)
+- `current_palette` (str, persists to `app_stats`)
 - `_pending_adds`, `_pending_completions`, `_pending_deletes` (queued hold flows)
 
 ## Critical Flows
@@ -69,7 +71,8 @@ Last updated: 2026-03-03 00:54:00 (Antigravity Maintenance)
 ## Rendering Notes
 
 - Window shape: pill path + mask.
-- Background: dynamic color from time engine.
+- Background: dynamic color from time engine (interpolated via `PALETTES`).
+- Palettes: `yellow` (default), `mint`, `maroon`, `grayscale`.
 - Avoid fragile paint-time logic that can break startup.
 - Keep overlays explicitly hidden/shown to prevent mode bleed-through.
 
